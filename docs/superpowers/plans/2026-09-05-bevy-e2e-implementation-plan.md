@@ -2,63 +2,61 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the v0.1 `bevy_e2e` crate: synchronous Rust tests launch a rendered Bevy 0.19.x child process, control it over BRP, interact through keyboard/mouse/UI, inspect reflected ECS state, wait on real child frames, and capture failure diagnostics.
+**Goal:** Build the v0.1 `bevy_e2e` package so synchronous Rust tests can launch a rendered Bevy 0.19.x child, drive it over BRP, interact through keyboard/mouse/UI, inspect reflected ECS state, and capture resilient failure diagnostics.
 
-**Architecture:** Publish one crate with `client` and `runtime` Cargo features. The parent side uses Bevy's `BrpRequest` with a synchronous `ureq` client and built-in BRP operations; the child side registers `E2eId` and reuses `bevy_brp_extras` for BRP/HTTP, diagnostics, screenshots, and shutdown. There are no custom BRP methods or framework-owned frame/protocol resources. Rendered tests are serialized because Bevy 0.19 keeps the render-subapp BRP port fixed at 15703.
+**Architecture:** One package has `client` and `runtime` feature-separated sides. The parent uses Bevy `BrpRequest` with synchronous `ureq`; the child registers `E2eId` and reuses `bevy_brp_extras` for BRP/HTTP, diagnostics, screenshots, shutdown, and cursor movement. Exact held keyboard/mouse primitives dual-write Bevy's typed input message and aggregate `WindowEvent`, matching Bevy winit's forwarding behavior.
 
-**Tech Stack:** Rust 2024, Rust 1.95+, Bevy 0.19.1, `bevy_brp_extras` 0.22.3, BRP JSON-RPC/HTTP, `ureq` 3.0.8, Serde/serde_json, thiserror, `image` for screenshot validation, GitHub Actions, Xvfb on Linux.
+**Tech Stack:** Rust 2024, Rust 1.95+, Bevy 0.19.1, `bevy_brp_extras` 0.22.3, BRP JSON-RPC/HTTP, `ureq` 3.x, Serde/serde_json, thiserror, image 0.25 for screenshot verification, GitHub Actions, Xvfb.
 
 **Spec:** `docs/superpowers/specs/2026-09-04-bevy-e2e-design.md`
 
 ## Global Constraints
 
-- Implement all work in one feature PR; task commits are checkpoints inside that PR, not separate PRs.
-- Target Bevy 0.19.x only; do not add multi-version compatibility code.
-- Keep one public package: `bevy_e2e`; use Cargo features instead of separate runtime/client crates.
-- Default feature is `client`; consumer game binaries use `default-features = false, features = ["runtime"]`.
-- Use ordinary synchronous Rust `#[test]`; do not require Tokio or a custom test runner.
-- One child process per E2E test; no pooling or reset protocol.
-- BRP is the only transport; do not add a second RPC protocol or custom BRP method.
-- Use Bevy's `BrpRequest` rather than hand-building the JSON-RPC envelope.
-- v0.1 supports one-response BRP calls only; detect/reject `text/event-stream` responses instead of adding an SSE/watch API.
-- Bind the main remote-control server to `127.0.0.1` only and require `BEVY_E2E=1` runtime activation.
-- `E2eId` is the stable selector. Raw Bevy `Entity` values are diagnostic/transport details only.
-- Player-facing input is preferred; ECS convenience APIs remain read-oriented.
-- `click(id)` must copy Bevy 0.19's `UiGlobalTransform` + window scale-factor algorithm; do not query `ComputedNode` for the center.
-- Use `brp_extras/get_diagnostics.frame_count` for frame waits/readiness; do not add `E2eFrame` or a protocol-version resource.
-- Rendered E2E suites run with `--test-threads=1` because Bevy 0.19's render BRP port 15703 is not configurable through `with_port()`.
-- Rendered screenshot tests must validate visible/non-uniform pixels, not only PNG headers/file length.
-- Rendered desktop execution is the generic path; do not add a generic headless-mode switch.
-- Linux/Xvfb and Windows are release gates; macOS CI is deferred.
-- Keep public APIs explicit and small; raw `Game::brp` is the escape hatch instead of wrapper proliferation.
+- Keep all v0.1 implementation in one feature PR.
+- Target Bevy 0.19.x only; no compatibility shims.
+- Publish one package: `bevy_e2e`.
+- Default Cargo feature is `client`; game binaries use `default-features = false, features = ["runtime"]`.
+- `fixture` is repository-only and enables a rendered Bevy UI profile.
+- Use ordinary synchronous `#[test]`; no Tokio/custom runner/proc macro.
+- One child process per `run()`; no pooling/reset protocol.
+- BRP is the only transport; add no custom BRP methods.
+- Use Bevy `BrpRequest`; do not hand-build JSON-RPC envelopes.
+- v0.1 is one-response BRP only; reject `text/event-stream`.
+- Main BRP binds loopback only and activates only with `BEVY_E2E=1`.
+- `E2eId` is stable identity; raw `Entity` is transport/diagnostic only.
+- Use `brp_extras/get_diagnostics.frame_count`; no framework frame/protocol resource.
+- Input must reach both typed input messages and aggregate `WindowEvent` consumers.
+- Reuse `brp_extras/move_mouse` so `Window::cursor_position()` is also updated.
+- `click(id)` uses Bevy 0.19.1's `UiGlobalTransform` translation + window scale-factor algorithm.
+- Screenshot tests decode pixels and reject uniform/black captures.
+- Framework rendered CI is serialized for GPU/compositor stability; this is not a main-BRP protocol requirement.
+- Do not silently relaunch a consumer game after startup timeout.
+- No generic headless mode.
+- Linux/Xvfb and Windows are release gates; macOS CI deferred.
 
 ---
 
 ## File Structure
-
-Create this structure during the tasks below:
 
 ```text
 .
 ├── Cargo.toml
 ├── README.md
 ├── src/
-│   ├── lib.rs          # feature-gated public exports + run() + cargo_bin!
-│   ├── error.rs        # framework error and Result alias
-│   ├── options.rs      # E2eLaunchOptions
-│   ├── id.rs           # shared E2eId component
-│   ├── client.rs       # crate-private synchronous one-response BRP client + unit tests
-│   ├── process.rs      # child spawn, pipe draining, exit/kill/reap
-│   ├── game.rs         # public client-side Game facade and lifecycle
-│   ├── runtime.rs      # runtime-only BevyE2EPlugin
-│   ├── selector.rs     # E2eId resolution
-│   ├── inspect.rs      # reflected component/resource reads
-│   ├── wait.rs         # selector/frame/predicate waits
-│   ├── input.rs        # keyboard/mouse/UI-click composition
-│   └── artifacts.rs    # screenshot/world/failure/stdout/stderr bundles
-├── tests/
-│   ├── public_api.rs
+│   ├── lib.rs
+│   ├── error.rs
+│   ├── options.rs
+│   ├── id.rs
+│   ├── client.rs
+│   ├── process.rs
+│   ├── game.rs
 │   ├── runtime.rs
+│   ├── selector.rs
+│   ├── inspect.rs
+│   ├── wait.rs
+│   ├── input.rs
+│   └── artifacts.rs
+├── tests/
 │   ├── lifecycle.rs
 │   ├── selectors.rs
 │   ├── inspection.rs
@@ -66,18 +64,20 @@ Create this structure during the tasks below:
 │   ├── input.rs
 │   ├── artifacts.rs
 │   ├── failure_harness.rs
+│   ├── public_api.rs
 │   └── fixtures/minimal_game.rs
 ├── scripts/assert_no_fixture_processes.sh
-├── docs/superpowers/specs/2026-09-04-bevy-e2e-design.md
-├── docs/superpowers/plans/2026-09-05-bevy-e2e-implementation-plan.md
-└── .github/workflows/ci.yml
+├── .github/workflows/ci.yml
+└── docs/superpowers/
+    ├── specs/2026-09-04-bevy-e2e-design.md
+    └── plans/2026-09-05-bevy-e2e-implementation-plan.md
 ```
 
-`BrpClient` stays crate-private. Its fake-HTTP tests live in `src/client.rs` under `#[cfg(test)]`; do not add a hidden public `testing` module solely to reach private code from integration tests.
+`BrpClient` and runtime activation helpers stay crate-private. Unit-test them inside their source modules instead of exporting hidden testing APIs.
 
 ---
 
-### Task 1: Bootstrap the crate, feature split, and shared public types
+### Task 1: Bootstrap the package, Cargo feature split, and shared API
 
 **Files:**
 - Create: `Cargo.toml`
@@ -89,13 +89,13 @@ Create this structure during the tasks below:
 - Modify: `README.md`
 
 **Interfaces:**
-- Produces shared `E2eId` and client-side `E2eLaunchOptions`, `Error`, `Result`, `cargo_bin!`.
-- Produces Cargo features `client`, `runtime`, and repository-only `fixture`.
-- Later tasks add `Game`/`run` under `client` and `BevyE2EPlugin` under `runtime`.
+- Produces `E2eId`.
+- Produces client-only `Error`, `Result`, `E2eLaunchOptions`, `cargo_bin!`.
+- Cargo features: `client`, `runtime`, `fixture`.
 
-- [ ] **Step 1: Create the exact manifest baseline**
+- [ ] **Step 1: Create the package manifest**
 
-Create `Cargo.toml`:
+Use this starting manifest:
 
 ```toml
 [package]
@@ -111,25 +111,20 @@ description = "Out-of-process end-to-end testing for Bevy games"
 default = ["client"]
 client = ["dep:ureq"]
 runtime = ["dep:bevy_brp_extras"]
-fixture = ["runtime"]
+fixture = ["runtime", "bevy/ui"]
 
 [dependencies]
 bevy = { version = "0.19.1", default-features = false, features = [
   "bevy_remote",
-  "bevy_render",
-  "bevy_ui",
-  "bevy_window",
-  "png",
   "serialize",
 ] }
 bevy_brp_extras = { version = "0.22.3", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-ureq = { version = "3.0.8", features = ["json"], optional = true }
+ureq = { version = "3", features = ["json"], optional = true }
 
 [dev-dependencies]
-bevy = { version = "0.19.1", features = ["bevy_remote", "png", "serialize"] }
 image = "0.25"
 tiny_http = "0.12"
 
@@ -139,25 +134,25 @@ path = "tests/fixtures/minimal_game.rs"
 required-features = ["fixture"]
 ```
 
-Do not add a workspace, proc-macro crate, runtime crate, or CLI crate.
+Do not add a workspace or extra package.
 
-- [ ] **Step 2: Write the failing public API test**
+- [ ] **Step 2: Write the failing shared/public API test**
 
-Create `tests/public_api.rs`:
+`tests/public_api.rs`:
 
 ```rust
 use std::{path::PathBuf, time::Duration};
 use bevy_e2e::{E2eId, E2eLaunchOptions};
 
 #[test]
-fn shared_id_and_launch_options_are_stable() {
+fn shared_id_and_client_options_are_stable() {
     assert_eq!(E2eId::new("player").value, "player");
 
     let options = E2eLaunchOptions::new("target/debug/game")
         .startup_timeout(Duration::from_secs(3))
         .operation_timeout(Duration::from_secs(4))
         .shutdown_timeout(Duration::from_secs(2))
-        .artifact_root("tmp/e2e");
+        .artifact_root("target/e2e");
 
     assert_eq!(options.binary(), PathBuf::from("target/debug/game").as_path());
     assert_eq!(options.startup_timeout_value(), Duration::from_secs(3));
@@ -166,15 +161,15 @@ fn shared_id_and_launch_options_are_stable() {
 }
 ```
 
-- [ ] **Step 3: Run the test and verify the missing API fails**
+- [ ] **Step 3: Verify the test fails**
 
 ```bash
 cargo test --test public_api
 ```
 
-Expected: compile failure for missing `E2eId` / `E2eLaunchOptions`.
+Expected: compile failure for missing crate API.
 
-- [ ] **Step 4: Implement `E2eId` exactly once in shared code**
+- [ ] **Step 4: Implement `E2eId`**
 
 `src/id.rs`:
 
@@ -194,21 +189,40 @@ impl E2eId {
 }
 ```
 
-Do not duplicate the selector type in client/runtime modules.
+- [ ] **Step 5: Implement initial client-side errors/options**
 
-- [ ] **Step 5: Implement the initial error/options/export surface**
-
-`src/error.rs` starts with concrete variants used by the first two tasks:
+`src/error.rs` starts with:
 
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("failed to spawn child process: {0}")]
     Spawn(#[source] std::io::Error),
+
     #[error("BRP request `{method}` failed: {message}")]
     Brp { method: String, message: String },
-    #[error("BRP watching/SSE response is not supported by v0.1: `{0}`")]
+
+    #[error("BRP watch/SSE response is not supported by v0.1: `{0}`")]
     UnsupportedWatch(String),
+
+    #[error("selector `{0}` was not found")]
+    SelectorNotFound(String),
+
+    #[error("selector `{0}` matched more than one entity")]
+    AmbiguousSelector(String),
+
+    #[error("operation `{operation}` timed out after {timeout:?}")]
+    Timeout {
+        operation: String,
+        timeout: std::time::Duration,
+    },
+
+    #[error("child process exited unexpectedly with status {0}")]
+    ChildExited(std::process::ExitStatus),
+
+    #[error("artifact operation failed: {0}")]
+    Artifact(String),
+
     #[error("invalid E2E configuration: {0}")]
     Configuration(String),
 }
@@ -216,23 +230,38 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 ```
 
-`src/options.rs` keeps fields private and defaults to:
+`E2eLaunchOptions` defaults:
 
-```rust
-startup_timeout = Duration::from_secs(10)
-operation_timeout = Duration::from_secs(5)
-shutdown_timeout = Duration::from_secs(3)
-artifact_root = PathBuf::from("test_output")
-artifact_label = None
-args = Vec::new()
-env = Vec::new()
+```text
+startup_timeout   = 10s
+operation_timeout = 5s
+shutdown_timeout  = 3s
+artifact_root     = test_output
+artifact_label    = None
+args              = []
+env               = []
 ```
 
-Provide builders/accessors named in the public test plus `arg`, `env`, and `artifact_label`.
+Add builders/accessors used in `tests/public_api.rs` plus `arg`, `env`, and `artifact_label`.
 
-`src/lib.rs` exports shared `E2eId`; `Error`, `Result`, and `E2eLaunchOptions` are exported under `#[cfg(feature = "client")]`. Define:
+- [ ] **Step 6: Wire feature-gated exports**
+
+`src/lib.rs`:
 
 ```rust
+mod id;
+pub use id::E2eId;
+
+#[cfg(feature = "client")]
+mod error;
+#[cfg(feature = "client")]
+mod options;
+
+#[cfg(feature = "client")]
+pub use error::{Error, Result};
+#[cfg(feature = "client")]
+pub use options::E2eLaunchOptions;
+
 #[macro_export]
 macro_rules! cargo_bin {
     ($name:literal) => {
@@ -241,17 +270,22 @@ macro_rules! cargo_bin {
 }
 ```
 
-- [ ] **Step 6: Verify default-client and runtime-only configurations**
+Later tasks add `Game`/`run` under `client` and `BevyE2EPlugin` under `runtime`.
+
+- [ ] **Step 7: Verify client-only and runtime-only dependency shapes**
 
 ```bash
 cargo fmt --check
 cargo test --test public_api
 cargo check --no-default-features --features runtime
+cargo tree --no-default-features --features runtime | grep -v ureq
 ```
 
-Expected: all commands PASS. The runtime-only check must not compile `ureq` as an enabled dependency.
+Expected:
+- test/check pass;
+- `ureq` is absent from runtime-only tree.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add Cargo.toml README.md src tests/public_api.rs
@@ -268,61 +302,48 @@ git commit -m "feat: bootstrap bevy e2e crate"
 - Modify: `src/error.rs`
 
 **Interfaces:**
-- Produces crate-private `BrpClient::new(port: u16, timeout: Duration) -> Self`.
-- Produces `BrpClient::request(&self, method: &str, params: Value) -> Result<Value>`.
-- Uses `bevy::remote::BrpRequest` for request serialization.
-- Rejects `text/event-stream`; v0.1 does not expose a watch-stream API.
+- `BrpClient::new(port: u16, timeout: Duration)`.
+- `BrpClient::request(method: &str, params: Value) -> Result<Value>`.
+- Uses `bevy::remote::BrpRequest`.
+- Rejects SSE.
 
-- [ ] **Step 1: Add private unit tests in `src/client.rs`**
+- [ ] **Step 1: Add private fake-HTTP unit tests**
 
-Under `#[cfg(test)]`, create a `tiny_http::Server` bound to `127.0.0.1:0` and cover these three responses:
+Inside `src/client.rs` under `#[cfg(test)]`, build `tiny_http::Server` on `127.0.0.1:0`.
+
+Cover:
 
 ```rust
 #[test]
-fn instant_result_is_returned() {
-    let server = TestServer::json(r#"{"jsonrpc":"2.0","id":1,"result":{"ready":true}}"#);
-    let client = BrpClient::new(server.port(), Duration::from_secs(1));
-    let value = client.request("world.list_resources", serde_json::json!({})).unwrap();
-    assert_eq!(value, serde_json::json!({"ready": true}));
-    assert_eq!(server.received_json()["method"], "world.list_resources");
-}
+fn returns_instant_result() { /* JSON result */ }
 
 #[test]
-fn remote_error_keeps_method_and_message() {
-    let server = TestServer::json(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"missing"}}"#);
-    let client = BrpClient::new(server.port(), Duration::from_secs(1));
-    let error = client.request("missing.method", serde_json::json!({})).unwrap_err();
-    assert!(error.to_string().contains("missing.method"));
-    assert!(error.to_string().contains("missing"));
-}
+fn preserves_remote_method_and_error_message() { /* JSON-RPC error */ }
 
 #[test]
-fn sse_response_is_rejected_explicitly() {
-    let server = TestServer::response(
-        "text/event-stream",
-        "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n",
-    );
-    let client = BrpClient::new(server.port(), Duration::from_secs(1));
-    assert!(matches!(
-        client.request("world.get_components+watch", serde_json::json!({})),
-        Err(Error::UnsupportedWatch(_))
-    ));
-}
+fn rejects_event_stream_response() { /* Content-Type: text/event-stream */ }
 ```
 
-`TestServer` stays inside the private test module; do not export testing-only client internals.
+The success test must inspect the POST body and assert:
 
-- [ ] **Step 2: Verify the unit tests fail**
+```rust
+assert_eq!(request["method"], "world.list_resources");
+assert!(request.get("id").is_some());
+```
+
+Do not export `BrpClient` for tests.
+
+- [ ] **Step 2: Verify failure**
 
 ```bash
 cargo test client::tests
 ```
 
-Expected: compile failure because `BrpClient` is missing.
+Expected: compile failure for missing `BrpClient`.
 
-- [ ] **Step 3: Implement requests with Bevy `BrpRequest`**
+- [ ] **Step 3: Implement with `BrpRequest`**
 
-The core request construction is:
+Core request:
 
 ```rust
 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -340,13 +361,16 @@ let mut response = ureq::post(&self.url)
     })?;
 ```
 
-Before `read_json`, inspect `Content-Type`. If it begins with `text/event-stream`, return `Error::UnsupportedWatch(method.to_owned())`.
+Before JSON parsing, inspect response `Content-Type`. If it starts with `text/event-stream`, return `Error::UnsupportedWatch`.
 
-Parse the JSON-RPC body as `serde_json::Value`; return `result`, map `error.message` to `Error::Brp`, and reject malformed bodies with method/context in the error message.
+Parse:
+- `result` → return it;
+- `error.message` → `Error::Brp`;
+- malformed body → contextual `Error::Brp`.
 
-Do not add retries, connection pools, auth, async runtime, or SSE reader state.
+No async runtime, retry layer, auth, or SSE reader state.
 
-- [ ] **Step 4: Run focused tests**
+- [ ] **Step 4: Verify**
 
 ```bash
 cargo test client::tests
@@ -364,127 +388,129 @@ git commit -m "feat: add synchronous brp client"
 
 ---
 
-### Task 3: Add the runtime plugin and rendered fixture
+### Task 3: Add runtime plugin and the rendered fixture
 
 **Files:**
 - Create: `src/runtime.rs`
-- Create: `tests/runtime.rs`
 - Create: `tests/fixtures/minimal_game.rs`
 - Modify: `src/lib.rs`
+- Modify: `Cargo.toml`
 
 **Interfaces:**
-- Produces public `BevyE2EPlugin` when feature `runtime` is enabled.
-- The plugin is inert unless `BEVY_E2E=1`.
-- When active it registers `E2eId` and adds `bevy_brp_extras::BrpExtrasPlugin`.
-- It adds no frame resource, protocol resource, increment system, or custom BRP method.
+- Public runtime-only `BevyE2EPlugin`.
+- Private `runtime_enabled`.
+- Fixture exposes stable IDs/types used by later tests.
 
-- [ ] **Step 1: Write runtime gate tests**
+- [ ] **Step 1: Write private runtime unit tests first**
 
-`tests/runtime.rs`:
-
-```rust
-#[test]
-fn activation_parser_requires_exact_one() {
-    assert!(bevy_e2e::runtime_enabled_for_test(|key| {
-        (key == "BEVY_E2E").then(|| "1".to_owned())
-    }));
-    assert!(!bevy_e2e::runtime_enabled_for_test(|_| None));
-    assert!(!bevy_e2e::runtime_enabled_for_test(|_| Some("0".to_owned())));
-}
-```
-
-Expose the pure parser only as `#[doc(hidden)]` under `cfg(any(test, feature = "fixture"))`; the product API remains `BevyE2EPlugin`/`E2eId`.
-
-- [ ] **Step 2: Verify failure**
-
-```bash
-cargo test --features fixture --test runtime -- --test-threads=1
-```
-
-Expected: compile failure for missing runtime plugin/parser.
-
-- [ ] **Step 3: Implement the minimal runtime plugin**
-
-`src/runtime.rs`:
+Inside `src/runtime.rs`:
 
 ```rust
-use bevy::prelude::*;
-use bevy_brp_extras::BrpExtrasPlugin;
-use crate::E2eId;
+#[cfg(test)]
+mod tests {
+    use super::runtime_enabled;
 
-pub struct BevyE2EPlugin;
-
-impl Plugin for BevyE2EPlugin {
-    fn build(&self, app: &mut App) {
-        if std::env::var("BEVY_E2E").as_deref() != Ok("1") {
-            return;
-        }
-
-        app.register_type::<E2eId>();
-        app.add_plugins(BrpExtrasPlugin);
+    #[test]
+    fn activation_requires_exact_one() {
+        assert!(runtime_enabled(|key| (key == "BEVY_E2E").then(|| "1".into())));
+        assert!(!runtime_enabled(|_| None));
+        assert!(!runtime_enabled(|_| Some("0".into())));
     }
 }
 ```
 
-Keep activation parsing factored so the test does not mutate process-global environment.
+Do not create `tests/runtime.rs` and do not export a testing-only parser.
 
-- [ ] **Step 4: Build a deterministic rendered fixture**
+- [ ] **Step 2: Verify failure**
 
-`tests/fixtures/minimal_game.rs` must use `DefaultPlugins`, a fixed primary-window size, and visibly contrasting UI. Define reflected state:
+```bash
+cargo test --no-default-features --features runtime runtime::tests
+```
+
+Expected: compile failure because runtime module/plugin does not exist.
+
+- [ ] **Step 3: Implement `BevyE2EPlugin`**
+
+Private activation helper:
 
 ```rust
-#[derive(Component, Reflect)]
-#[reflect(Component)]
-pub struct Health {
-    pub current: u32,
-}
-
-#[derive(Resource, Reflect, Default)]
-#[reflect(Resource)]
-pub struct FixtureState {
-    pub play_clicked: bool,
-    pub space_press_count: u32,
-    pub space_released: bool,
+fn runtime_enabled(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> bool {
+    lookup("BEVY_E2E").as_deref() == Some("1")
 }
 ```
 
-Spawn:
+Plugin behavior:
 
-- a full-window root UI with a bright non-black background;
-- a contrasting button tagged `E2eId::new("main_menu.play")`;
-- a gameplay HUD entity tagged `E2eId::new("gameplay.hud")`, spawned only after the button click;
-- a non-UI player entity tagged `E2eId::new("player")` with `Health { current: 100 }`;
-- a duplicate `player` only when `--duplicate-id` is passed.
+```rust
+impl Plugin for BevyE2EPlugin {
+    fn build(&self, app: &mut App) {
+        if !runtime_enabled(|key| std::env::var(key).ok()) {
+            return;
+        }
 
-Register `Health` and `FixtureState`. Add `BevyE2EPlugin`. Add fixture switches:
-
-```text
---skip-e2e-plugin   do not add BevyE2EPlugin
---sleep-forever     block before App::run for kill/reap testing
+        app.register_type::<E2eId>();
+        app.add_plugins(bevy_brp_extras::BrpExtrasPlugin);
+    }
+}
 ```
 
-Record button interaction and `ButtonInput<KeyCode>` observations into `FixtureState` so input tests prove Bevy processed the injected messages.
+Do not add custom resources or remote methods.
 
-- [ ] **Step 5: Verify fixture/feature builds**
+- [ ] **Step 4: Build the fixture app**
+
+`tests/fixtures/minimal_game.rs` uses `DefaultPlugins` and creates:
+
+- deterministic primary window size/title;
+- UI root;
+- button with `E2eId::new("main_menu.play")`;
+- HUD entity with `E2eId::new("gameplay.hud")`, spawned or made visible after click;
+- player entity with `E2eId::new("player")` + reflected `Health { current: 100 }`;
+- reflected `FixtureState` resource:
+  - `play_clicked: bool`;
+  - `space_press_count: u32`;
+  - `key_is_down: bool`;
+  - `mouse_left_is_down: bool`;
+  - `mouse_press_count: u32`;
+  - `cursor_position: Option<Vec2>`;
+- systems observing `ButtonInput<KeyCode>`, `ButtonInput<MouseButton>`, window cursor position, and UI `Interaction`;
+- `--duplicate-id` adds a second `player`;
+- `--skip-e2e-plugin` omits plugin;
+- `--sleep-forever` blocks before app start for kill fallback;
+- `--exit-after-ready-ms=<n>` prints a known stdout line and stderr line, then exits with code 42 after the app has run for the requested delay.
+
+Register `Health` and `FixtureState`.
+
+- [ ] **Step 5: Prove the rendered fixture feature actually builds**
 
 ```bash
 cargo build --features fixture --bin bevy-e2e-fixture
-cargo test --features fixture --test runtime -- --test-threads=1
-cargo check --no-default-features --features runtime
+```
+
+Expected: PASS with `DefaultPlugins`, winit windowing, UI rendering, default font, and picking available through the `bevy/ui` fixture feature.
+
+If the Bevy 0.19.1 high-level `ui` profile itself fails on a supported host due to a missing platform dependency, fix the CI/native package installation; do not move rendering features back into the base client dependency.
+
+- [ ] **Step 6: Verify runtime unit tests and fixture**
+
+```bash
+cargo test --no-default-features --features runtime runtime::tests
+cargo build --features fixture --bin bevy-e2e-fixture
 ```
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/runtime.rs src/lib.rs tests/runtime.rs tests/fixtures/minimal_game.rs
-git commit -m "feat: add bevy e2e runtime"
+git add Cargo.toml src/runtime.rs src/lib.rs tests/fixtures/minimal_game.rs
+git commit -m "feat: add bevy e2e runtime fixture"
 ```
 
 ---
 
-### Task 4: Implement child lifecycle and `run()`
+### Task 4: Implement child process lifecycle and `run()`
 
 **Files:**
 - Create: `src/process.rs`
@@ -494,115 +520,125 @@ git commit -m "feat: add bevy e2e runtime"
 - Modify: `src/error.rs`
 
 **Interfaces:**
-- Produces `Game::launch(E2eLaunchOptions) -> Result<Game>` and idempotent `Game::shutdown(&mut self) -> Result<()>`.
-- Produces `run(options, FnOnce(&mut Game) -> Result<()>) -> Result<()>`.
-- Readiness is a successful `brp_extras/get_diagnostics` response; no protocol resource is read.
-- The selected port controls only the main BRP server. Rendered tests are serialized because render port 15703 remains shared.
+- `Game::launch`.
+- `Game::shutdown`.
+- `run`.
+- `Game::is_running`.
+- readiness via `brp_extras/get_diagnostics`.
 
-- [ ] **Step 1: Write lifecycle tests without a parallel-launch claim**
+- [ ] **Step 1: Write basic lifecycle tests**
 
-`tests/lifecycle.rs`:
+`tests/lifecycle.rs` includes:
 
 ```rust
 #[test]
-fn game_launches_reaches_extras_and_shuts_down() {
+fn launch_reaches_diagnostics_and_shutdown_reaps() {
     let mut game = Game::launch(fixture_options()).unwrap();
-    let diagnostics = game.brp("brp_extras/get_diagnostics", serde_json::json!({})).unwrap();
-    assert!(diagnostics.get("frame_count").is_some());
     assert!(game.is_running());
     game.shutdown().unwrap();
     assert!(!game.is_running());
 }
+
+#[test]
+fn missing_runtime_returns_startup_timeout_and_reaps() {
+    let options = fixture_options()
+        .arg("--skip-e2e-plugin")
+        .startup_timeout(Duration::from_millis(500));
+    assert!(matches!(Game::launch(options), Err(Error::Timeout { .. })));
+}
 ```
 
-Add:
+- [ ] **Step 2: Add the concurrency experiment**
 
-- startup-timeout test with `--skip-e2e-plugin` and a short timeout;
-- early-child-exit test using a fixture arg that exits immediately;
-- double-shutdown idempotence test.
+One test launches two rendered children in two threads, each with its own main BRP port, and requires both to return `brp_extras/get_diagnostics`.
 
-Do **not** add a two-thread rendered launch test.
+```rust
+#[test]
+fn two_children_can_answer_distinct_main_brp_sessions() {
+    let a = std::thread::spawn(|| Game::launch(fixture_options()));
+    let b = std::thread::spawn(|| Game::launch(fixture_options()));
 
-- [ ] **Step 2: Verify lifecycle tests fail**
+    let mut a = a.join().unwrap().unwrap();
+    let mut b = b.join().unwrap().unwrap();
+
+    assert!(a.brp("brp_extras/get_diagnostics", json!({})).is_ok());
+    assert!(b.brp("brp_extras/get_diagnostics", json!({})).is_ok());
+
+    a.shutdown().unwrap();
+    b.shutdown().unwrap();
+}
+```
+
+This test pins observed Bevy 0.19 behavior; do not infer the answer from render port 15703.
+
+The framework's broader rendered suite still runs serialized in CI.
+
+- [ ] **Step 3: Verify lifecycle tests fail**
 
 ```bash
 cargo test --features fixture --test lifecycle -- --test-threads=1
 ```
 
-Expected: compile failure because `Game` is missing.
+Expected: compile failure for missing `Game`.
 
-- [ ] **Step 3: Implement `ChildProcess`**
+- [ ] **Step 4: Implement `ChildProcess`**
 
-`process.rs` must:
+Responsibilities:
 
-1. choose a candidate main port via `TcpListener::bind((Ipv4Addr::LOCALHOST, 0))`, read it, then drop the listener;
-2. spawn the requested binary with caller args/env plus framework overrides:
+1. select a main port by temporarily binding `127.0.0.1:0`, reading the port, and dropping the probe listener;
+2. spawn the requested binary with caller args/env and framework-owned:
+   - `BEVY_E2E=1`;
+   - `BRP_EXTRAS_PORT=<port>`;
+3. pipe stdout/stderr;
+4. immediately drain each pipe on a dedicated thread into shared byte buffers;
+5. expose `try_wait`, `wait_for_exit`, `kill`, and `reap`.
 
-```text
-BEVY_E2E=1
-BRP_EXTRAS_PORT=<candidate>
-```
+No log-message scraping.
 
-3. pipe stdout and stderr;
-4. immediately drain each pipe on a dedicated reader thread into shared byte buffers;
-5. expose `try_wait`, bounded `wait_for_exit`, `kill`, and reap behavior.
+- [ ] **Step 5: Implement startup readiness without hidden relaunch**
 
-Do not claim the selected port changes Bevy's render-subapp port.
+Poll `brp_extras/get_diagnostics` roughly every 25ms until `startup_timeout`.
 
-- [ ] **Step 4: Implement readiness**
+Rules:
+- first successful JSON result → ready;
+- null `frame_count` is acceptable;
+- early child exit → `ChildExited`;
+- alive child + timeout → cleanly kill/reap and return startup timeout with output context.
 
-Poll every roughly 25 ms until `startup_timeout`:
+Do not automatically restart the game on timeout; repeating consumer startup may repeat side effects.
 
-```rust
-client.request("brp_extras/get_diagnostics", serde_json::json!({}))
-```
-
-Any successful JSON result is readiness. `frame_count` may be null during the first samples; readiness does not require a protocol number or a non-null count.
-
-During polling, check `child.try_wait()` and return `ChildExited` immediately if the process ends.
-
-If the child remains alive but readiness times out, shut it down/kill/reap before returning the startup timeout. Port-reselection retry is allowed only when captured process/server diagnostics clearly indicate an address-in-use bind failure; do not triple-retry all startup failures.
-
-- [ ] **Step 5: Implement graceful shutdown and force-kill fallback**
-
-Normal shutdown calls:
+- [ ] **Step 6: Implement shutdown**
 
 ```text
 brp_extras/shutdown
+→ wait shutdown_timeout
+→ kill if still alive
+→ reap
 ```
 
-then waits `shutdown_timeout`, kills if still alive, and always reaps. Calling `shutdown()` twice returns success once the child is already gone.
+`shutdown()` is idempotent.
 
-Add a process-level test using `--sleep-forever`; invoke the same kill/reap primitive and assert `try_wait()` reports an exited process afterward.
+- [ ] **Step 7: Implement `run()` panic preservation**
 
-- [ ] **Step 6: Implement `run()` with panic preservation**
+Use `catch_unwind(AssertUnwindSafe(...))`.
 
-Use:
+For now call a private no-op `capture_failure_best_effort`; Task 7 fills it in.
 
-```rust
-let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test(&mut game)));
-```
+- [ ] **Step 8: Add force-kill process coverage**
 
-Behavior:
+Use fixture `--sleep-forever`, call the same kill/reap primitive used by shutdown fallback, and assert process exit.
 
-```text
-Ok(Ok(())) → shutdown → Ok
-Ok(Err(e)) → capture_failure_best_effort → shutdown best effort → Err(e)
-Err(panic) → capture_failure_best_effort → shutdown best effort → resume_unwind(panic)
-```
-
-Until Task 7, `capture_failure_best_effort` is a private no-op; do not expose incomplete artifact APIs.
-
-- [ ] **Step 7: Run focused verification**
+- [ ] **Step 9: Run lifecycle verification**
 
 ```bash
 cargo test --features fixture --test lifecycle -- --test-threads=1
-cargo fmt --check
 ```
 
-Expected: PASS.
+Expected: PASS, including the internal two-child concurrency experiment.
 
-- [ ] **Step 8: Commit**
+If only the two-child test fails, record the observed Bevy 0.19 failure in the test/README and serialize consumers as a documented limitation; do not invent a render-port workaround in this ticket.
+
+- [ ] **Step 10: Commit**
 
 ```bash
 git add src/process.rs src/game.rs src/lib.rs src/error.rs tests/lifecycle.rs
@@ -621,117 +657,85 @@ git commit -m "feat: manage bevy child lifecycle"
 - Create: `tests/inspection.rs`
 - Create: `tests/waits.rs`
 - Modify: `src/game.rs`
-- Modify: `src/error.rs`
 
 **Interfaces:**
-- `Game::exists`, `find`, `wait_for`, `wait_for_gone`.
-- crate-private `resolve_entity(id)` returning only the current BRP entity value.
-- `Game::component_json`, `resource_json`.
-- `Game::wait_frames`, `wait(Duration)`, `wait_until`.
-- Frame waits use `brp_extras/get_diagnostics.frame_count`.
+- `exists`, `find`.
+- private `resolve_entity`.
+- `component_json`, `resource_json`.
+- `wait_for`, `wait_for_gone`, `wait_frames`, `wait`, `wait_until`.
 
 - [ ] **Step 1: Write strict selector tests**
 
-`tests/selectors.rs`:
+Cover:
+- one match;
+- zero match;
+- duplicate match using `--duplicate-id`.
+
+`exists("missing")` is false; ambiguity is still an error.
+
+- [ ] **Step 2: Write inspection tests**
+
+Assert:
 
 ```rust
-assert!(game.exists("player").unwrap());
-assert!(!game.exists("missing").unwrap());
-game.find("player").unwrap();
-assert!(matches!(game.find("missing"), Err(Error::SelectorNotFound(_))));
-```
-
-Launch a separate serialized fixture with `--duplicate-id` and assert `find("player")` returns `AmbiguousSelector`.
-
-- [ ] **Step 2: Write reflected inspection tests**
-
-`tests/inspection.rs` asserts the fixture's exact reflected type paths:
-
-```rust
-let health = game.component_json("player", "bevy_e2e_fixture::Health").unwrap();
+let health = game.component_json("player", HEALTH_TYPE).unwrap();
 assert_eq!(health["current"], 100);
 
-let state = game.resource_json("bevy_e2e_fixture::FixtureState").unwrap();
+let state = game.resource_json(FIXTURE_STATE_TYPE).unwrap();
 assert_eq!(state["play_clicked"], false);
 ```
 
-If compile-time `type_name::<Health>()` in the fixture proves a different path, pin that exact path once in fixture test constants and README rather than supporting aliases.
+Pin actual reflected type paths in one shared fixture-test constant module if needed.
 
-- [ ] **Step 3: Write wait tests in their own test target**
+- [ ] **Step 3: Write wait tests**
 
 `tests/waits.rs` covers:
+- immediate `wait_for("player")`;
+- timeout for missing selector;
+- `wait_frames(2)` observes diagnostics frame delta >=2;
+- `wait_until` success and timeout.
 
-```rust
-#[test]
-fn wait_frames_observes_diagnostics_frame_count() {
-    let game = launch_fixture();
-    let before = diagnostics_frame(&game);
-    game.wait_frames(2).unwrap();
-    let after = diagnostics_frame(&game);
-    assert!(after >= before + 2);
-}
-```
-
-Also test:
-
-- `wait_for("player")` succeeds;
-- `wait_for("missing")` times out with the selector in the error;
-- `wait_until` succeeds on a changing condition and times out on a permanently false predicate.
-
-- [ ] **Step 4: Verify all three test targets fail**
+- [ ] **Step 4: Verify failure**
 
 ```bash
-cargo test --features fixture --test selectors --test inspection --test waits -- --test-threads=1
+cargo test --features fixture \
+  --test selectors --test inspection --test waits -- --test-threads=1
 ```
 
 Expected: compile failure for missing methods.
 
 - [ ] **Step 5: Implement selector resolution with `world.query`**
 
-Request only the reflected `E2eId` component:
+Use `BrpQueryParams`/`ComponentSelector` types where practical.
 
-```json
-{
-  "data": {
-    "components": ["bevy_e2e::id::E2eId"],
-    "option": [],
-    "has": []
-  },
-  "filter": {
-    "with": ["bevy_e2e::id::E2eId"],
-    "without": []
-  },
-  "strict": true
-}
-```
+Query `E2eId`, filter values client-side, enforce 0/1/2+.
 
-Filter returned component values client-side by `value`. Enforce zero/one/multiple semantics. Do not cache raw entities across calls.
-
-`exists()` returns false only for zero matches; ambiguity remains an error.
+Do not cache raw entity IDs.
 
 - [ ] **Step 6: Implement reflected reads**
 
-After resolving the current entity, call built-in `world.get_components` with `strict: true`. Resources use `world.get_resources`. Preserve BRP remote errors instead of returning null/default values.
+After resolution:
+- `world.get_components` with strict behavior for the requested type;
+- `world.get_resources` for resource reads.
 
-- [ ] **Step 7: Implement waits from observable state**
+Preserve remote errors.
 
-Selector/predicate waits use a 10–25 ms poll interval until the operation timeout.
+- [ ] **Step 7: Implement waits**
 
-`wait_frames(n)` repeatedly calls `brp_extras/get_diagnostics`. First wait until `frame_count` is numeric, then:
+`wait_frames`:
+1. read diagnostics frame count;
+2. store numeric baseline;
+3. poll until `current >= baseline + frames`.
 
-```rust
-let target = start.saturating_add(frames as f64);
-while current < target {
-    // sleep short poll interval, re-read diagnostics
-}
-```
+If initial count is null, keep polling within operation timeout until numeric before taking baseline.
 
-Normalize the returned numeric value to `u64` after verifying it is finite/non-negative. Do not create an app-side frame resource and do not convert frame counts to wall-clock durations.
+`wait_for`/`wait_for_gone`/`wait_until` use 10–25ms polling.
 
-- [ ] **Step 8: Run focused tests**
+- [ ] **Step 8: Verify**
 
 ```bash
-cargo test --features fixture --test selectors --test inspection --test waits -- --test-threads=1
+cargo test --features fixture \
+  --test selectors --test inspection --test waits -- --test-threads=1
 ```
 
 Expected: PASS.
@@ -739,13 +743,14 @@ Expected: PASS.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/selector.rs src/inspect.rs src/wait.rs src/game.rs src/error.rs tests/selectors.rs tests/inspection.rs tests/waits.rs
+git add src/selector.rs src/inspect.rs src/wait.rs src/game.rs \
+  tests/selectors.rs tests/inspection.rs tests/waits.rs
 git commit -m "feat: add selectors inspection and waits"
 ```
 
 ---
 
-### Task 6: Add keyboard, mouse, and selector-based Bevy UI clicks
+### Task 6: Add correct keyboard, mouse, and Bevy UI interaction
 
 **Files:**
 - Create: `src/input.rs`
@@ -754,78 +759,112 @@ git commit -m "feat: add selectors inspection and waits"
 - Modify: `tests/fixtures/minimal_game.rs`
 
 **Interfaces:**
-- `Game::key_down`, `key_up`, `press_key`.
-- `Game::move_mouse`, `mouse_down`, `mouse_up`, `click_at`.
-- `Game::click(id)` for Bevy UI entities only.
-- Exact input uses built-in `world.write_message` and the primary window entity.
+- `key_down`, `key_up`, `press_key`.
+- `move_mouse`, `mouse_down`, `mouse_up`, `click_at`.
+- `click(id)`.
 
-- [ ] **Step 1: Write keyboard behavior tests**
+- [ ] **Step 1: Write input-channel regression tests before implementation**
 
-The fixture records `ButtonInput<KeyCode>` observations. Test:
+The fixture's `FixtureState` must let the test prove three independent paths.
+
+Keyboard:
 
 ```rust
-game.press_key(KeyCode::Space).unwrap();
-game.wait_until(Duration::from_secs(2), |game| {
-    Ok(game.resource_json(FIXTURE_STATE)?["space_press_count"] == 1)
-}).unwrap();
+game.key_down(KeyCode::Space).unwrap();
+game.wait_frames(1).unwrap();
+
+let state = game.resource_json(FIXTURE_STATE_TYPE).unwrap();
+assert!(state["key_is_down"].as_bool().unwrap());
+assert_eq!(state["space_press_count"], 1);
+
+game.key_up(KeyCode::Space).unwrap();
+game.wait_frames(1).unwrap();
+assert!(!game.resource_json(FIXTURE_STATE_TYPE).unwrap()["key_is_down"]
+    .as_bool().unwrap());
 ```
 
-Also test explicit `key_down` remains observable for a child frame before `key_up`, then assert the fixture observed release.
+Mouse `ButtonInput`:
 
-- [ ] **Step 2: Write mouse/UI behavior tests**
+```rust
+game.mouse_down(MouseButton::Left).unwrap();
+game.wait_frames(1).unwrap();
+assert!(game.resource_json(FIXTURE_STATE_TYPE).unwrap()["mouse_left_is_down"]
+    .as_bool().unwrap());
 
-Test:
+game.mouse_up(MouseButton::Left).unwrap();
+game.wait_frames(1).unwrap();
+```
+
+UI/picking:
 
 ```rust
 game.click("main_menu.play").unwrap();
 game.wait_for("gameplay.hud").unwrap();
-assert_eq!(
-    game.resource_json(FIXTURE_STATE).unwrap()["play_clicked"],
-    true
-);
+assert!(game.resource_json(FIXTURE_STATE_TYPE).unwrap()["play_clicked"]
+    .as_bool().unwrap());
 ```
 
-Target `E2eId("player")`, which is not UI, and assert a clear unsupported-UI-target error.
+- [ ] **Step 2: Pin cursor/window state**
 
-- [ ] **Step 3: Verify input tests fail**
+Add a test:
+
+```rust
+let pos = Vec2::new(120.0, 80.0);
+game.move_mouse(pos).unwrap();
+game.wait_frames(1).unwrap();
+
+let state = game.resource_json(FIXTURE_STATE_TYPE).unwrap();
+assert_eq!(state["cursor_position"][0], 120.0);
+assert_eq!(state["cursor_position"][1], 80.0);
+```
+
+This proves reuse of extras preserves `Window::cursor_position()`.
+
+- [ ] **Step 3: Pin `UiGlobalTransform` BRP JSON shape**
+
+Query the button's reflected `UiGlobalTransform` and assert:
+- it is an array;
+- length >= 6;
+- entries `[4]` and `[5]` are numeric.
+
+This locks the Bevy 0.19.1 official remote integration-example shape used by `click(id)`.
+
+- [ ] **Step 4: Verify failure**
 
 ```bash
 cargo test --features fixture --test input -- --test-threads=1
 ```
 
-Expected: compile failure for missing input methods.
+Expected: compile failure for missing input API.
 
-- [ ] **Step 4: Resolve the primary window once per operation**
+- [ ] **Step 5: Implement a private dual-write helper**
 
-Use `world.query` for `bevy_window::window::Window`. Require exactly one primary fixture window. Capture:
+For exact held inputs, one logical event is sent through two built-in BRP `world.write_message` calls:
 
-- raw window entity for message payloads;
-- `resolution.scale_factor` for UI coordinate conversion.
-
-Do not keep a durable cached entity across unrelated public calls.
-
-- [ ] **Step 5: Implement exact keyboard down/up with typed Bevy values**
-
-Construct:
-
-```rust
-let input = KeyboardInput {
-    key_code: key,
-    logical_key: Key::Unidentified(NativeKey::Unidentified),
-    state,
-    text: None,
-    repeat: false,
-    window: window_entity,
-};
-let event = WindowEvent::KeyboardInput(input);
-let value = serde_json::to_value(event)?;
+```text
+typed message T
+aggregate WindowEvent::from(T)
 ```
 
-Send `value` through built-in `world.write_message` with message type `type_name::<WindowEvent>()` using Bevy's `BrpWriteMessageParams`.
+Use Bevy's real serializable message types and `BrpWriteMessageParams`; do not hand-maintain raw JSON field names.
 
-Never mutate `ButtonInput<KeyCode>` directly.
+Keyboard `T = KeyboardInput`.
 
-`press_key` is:
+Mouse button `T = MouseButtonInput`.
+
+This mirrors `bevy_winit::forward_bevy_events` and reaches both `ButtonInput` systems and picking/window-event consumers.
+
+- [ ] **Step 6: Implement keyboard primitives**
+
+Construct `KeyboardInput` with:
+- requested `KeyCode`;
+- `ButtonState`;
+- primary window entity;
+- `logical_key = Key::Unidentified(NativeKey::Unidentified)`;
+- `text = None`;
+- `repeat = false`.
+
+`press_key`:
 
 ```text
 key_down
@@ -834,11 +873,24 @@ key_down
 → wait_frames(1)
 ```
 
-- [ ] **Step 6: Implement mouse primitives using Bevy's documented BRP message shape**
+Do not mutate `ButtonInput` directly.
 
-`move_mouse(position)` sends `WindowEvent::CursorMoved` for the primary window. `mouse_down/up` send `WindowEvent::MouseButtonInput` with requested button and `Pressed`/`Released` state.
+- [ ] **Step 7: Reuse `brp_extras/move_mouse`**
 
-`click_at` is:
+`move_mouse(pos)` calls:
+
+```text
+brp_extras/move_mouse
+{ "position": [x, y] }
+```
+
+Do not replace this with raw `CursorMoved`: extras already dual-writes the relevant messages and updates the `Window` cursor position.
+
+- [ ] **Step 8: Implement mouse button primitives and `click_at`**
+
+`mouse_down/up` dual-write `MouseButtonInput` + aggregate `WindowEvent`.
+
+`click_at`:
 
 ```text
 move_mouse
@@ -848,27 +900,36 @@ move_mouse
 → wait_frames(1)
 ```
 
-Use the Bevy 0.19 integration example's `BrpWriteMessageParams` value shape; do not invent a framework remote method or mutate `Interaction`.
+Do not mutate `ButtonInput<MouseButton>` or `Interaction` directly.
 
-- [ ] **Step 7: Implement `click(id)` by copying Bevy 0.19's UI-center algorithm**
+- [ ] **Step 9: Implement selector click using Bevy's official UI-center path**
 
-Resolve the target entity and read only `UiGlobalTransform`. Its reflected `Affine2` is a flat array whose translation entries `[4]` and `[5]` are the UI center in physical pixels.
+Resolve the target and fetch `UiGlobalTransform`.
 
-Then:
+Use the pinned response shape:
 
 ```rust
-let physical_x = transform[4].as_f64().ok_or(...)?;
-let physical_y = transform[5].as_f64().ok_or(...)?;
+let arr = transform.as_array().ok_or_else(...)?;
+let physical_x = arr.get(4).and_then(Value::as_f64).ok_or_else(...)?;
+let physical_y = arr.get(5).and_then(Value::as_f64).ok_or_else(...)?;
+```
+
+Query the primary `Window`, read `resolution.scale_factor`, convert:
+
+```rust
 let logical = Vec2::new(
     (physical_x / scale_factor) as f32,
     (physical_y / scale_factor) as f32,
 );
-self.click_at(logical)
 ```
 
-Reject the target if `UiGlobalTransform` is absent. Do **not** query `ComputedNode`; do **not** rederive padding/origin/bounds geometry.
+Then `click_at(logical)`.
 
-- [ ] **Step 8: Run rendered input verification**
+Missing `UiGlobalTransform` → clear unsupported-target/configuration error.
+
+Do not query `ComputedNode`.
+
+- [ ] **Step 10: Verify rendered input**
 
 ```bash
 cargo test --features fixture --test input -- --test-threads=1
@@ -880,9 +941,9 @@ Linux equivalent:
 xvfb-run -a cargo test --features fixture --test input -- --test-threads=1
 ```
 
-Expected: PASS.
+Expected: PASS for typed keyboard state, typed mouse state, cursor position, and real UI interaction.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add src/input.rs src/game.rs tests/input.rs tests/fixtures/minimal_game.rs
@@ -891,7 +952,7 @@ git commit -m "feat: drive bevy keyboard mouse and ui"
 
 ---
 
-### Task 7: Add screenshots and diagnostic artifact bundles
+### Task 7: Add screenshots and resilient artifact bundles
 
 **Files:**
 - Create: `src/artifacts.rs`
@@ -901,50 +962,41 @@ git commit -m "feat: drive bevy keyboard mouse and ui"
 - Modify: `src/error.rs`
 
 **Interfaces:**
-- `Game::screenshot(label) -> Result<PathBuf>`.
-- `Game::capture_artifacts(label) -> Result<PathBuf>`.
-- crate-private `capture_failure_best_effort(error_text)` used by `run()`.
-- Screenshot call remains an ordinary one-response `brp_extras/screenshot` request; no SSE client change is required.
+- `screenshot(label)`.
+- `capture_artifacts(label)`.
+- private `capture_failure_best_effort`.
 
-- [ ] **Step 1: Write a rendered screenshot-content test**
+- [ ] **Step 1: Write rendered screenshot-content test**
 
-`tests/artifacts.rs` decodes the PNG rather than checking only magic bytes:
+Capture the fixture menu and decode with `image`:
 
 ```rust
-#[test]
-fn screenshot_contains_visible_fixture_content() {
-    let game = launch_fixture();
-    let path = game.screenshot("main-menu").unwrap();
-    let bytes = std::fs::read(path).unwrap();
-    let image = image::load_from_memory(&bytes).unwrap().to_rgba8();
+let image = image::open(path).unwrap().to_rgb8();
+assert!(image.width() > 0 && image.height() > 0);
 
-    assert!(image.width() > 0 && image.height() > 0);
-    let first = image.get_pixel(0, 0).0;
-    assert!(image.pixels().any(|pixel| pixel.0 != first));
-    assert!(image.pixels().any(|pixel| pixel.0[..3].iter().copied().max().unwrap() > 32));
-}
+let first = image.get_pixel(0, 0);
+assert!(image.pixels().any(|pixel| pixel != first));
+
+let average = image.pixels()
+    .map(|p| (u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2])) / 3)
+    .sum::<u32>() as f64
+    / f64::from(image.width() * image.height());
+assert!(average > 2.0);
 ```
 
-The fixture's intentionally contrasting background/button makes non-uniform content deterministic. A uniform/black PNG must fail the rendered gate.
+Use deterministic fixture visuals so non-uniformity is expected.
 
-Use a unique artifact root under `target/e2e-test-output` so serialized tests do not reuse output paths across runs.
+- [ ] **Step 2: Write explicit artifact test**
 
-- [ ] **Step 2: Write artifact-bundle tests**
+`capture_artifacts("checkpoint")` must contain:
+- `screenshot.png`;
+- `world.json`;
+- `stdout.log`;
+- `stderr.log`.
 
-After `capture_artifacts("checkpoint")`, assert:
+Explicit non-failure capture may omit `failure.json`.
 
-```text
-screenshot.png
-world.json
-stdout.log
-stderr.log
-```
-
-For failure capture, also require `failure.json`.
-
-Parse `world.json` and assert it includes `player` and `main_menu.play` plus a numeric/null diagnostics frame count field.
-
-- [ ] **Step 3: Verify artifact tests fail**
+- [ ] **Step 3: Verify failure**
 
 ```bash
 cargo test --features fixture --test artifacts -- --test-threads=1
@@ -952,68 +1004,77 @@ cargo test --features fixture --test artifacts -- --test-threads=1
 
 Expected: compile failure for missing artifact APIs.
 
-- [ ] **Step 4: Implement screenshot as a terminal extras request**
+- [ ] **Step 4: Implement screenshot using terminal `brp_extras/screenshot`**
 
-Create the parent artifact directory and absolute PNG destination, then call:
+Parent:
+1. creates artifact directory;
+2. resolves absolute PNG path;
+3. calls `brp_extras/screenshot`;
+4. waits for the BRP result;
+5. verifies file exists and is non-empty.
 
-```rust
-self.brp(
-    "brp_extras/screenshot",
-    serde_json::json!({ "path": absolute_path }),
-)?;
-```
+Do not add SSE parsing or GPU readback.
 
-The returned BRP result is the completion signal. Only after it succeeds, verify the file exists and has non-zero length. Do not poll the file as a substitute for protocol completion and do not add SSE parsing.
+- [ ] **Step 5: Implement bounded marked-world snapshot with `ComponentSelector::All`**
 
-- [ ] **Step 5: Implement the marked-world snapshot**
+Use one built-in `world.query`:
+- require/filter `E2eId`;
+- request `E2eId`;
+- set optional selector to `ComponentSelector::All`;
+- `strict = false`.
 
-Use `world.query` restricted to entities with `E2eId`, requesting `E2eId` plus optional all-reflectable component data. Serialize a stable parent-owned object:
+This is explicitly supported by Bevy 0.19 and returns all reflectable optional component values for the small set of E2E-marked entities.
+
+Wrap:
 
 ```json
 {
   "frame_count": 123,
-  "entities": [
-    {
-      "entity": "diagnostic raw id",
-      "e2e_id": "player",
-      "components": {}
-    }
-  ]
+  "entities": [ ...query result... ]
 }
 ```
 
-Read `frame_count` from `brp_extras/get_diagnostics`. Do not add `E2eFrame` and do not dump the entire world.
+Get frame count from diagnostics.
 
-- [ ] **Step 6: Persist continuously drained process output**
+Do not list/get every unmarked world entity.
 
-Expose snapshots of stdout/stderr buffers from `ChildProcess`. Write them with `String::from_utf8_lossy`; invalid bytes must not cause diagnostic capture itself to fail.
+- [ ] **Step 6: Persist process output**
 
-- [ ] **Step 7: Implement artifact session naming and failure metadata**
+Expose snapshots of continuously drained stdout/stderr. Use `String::from_utf8_lossy` for artifact files.
 
-If `artifact_label` exists, sanitize it to one filesystem-safe component. Otherwise use binary stem + parent PID + process-local atomic counter.
+- [ ] **Step 7: Implement session naming**
 
-`failure.json` contains at least:
+Caller label → sanitized path component.
 
-```json
-{
-  "error": "...",
-  "last_operation": "...",
-  "pid": 12345,
-  "elapsed_ms": 456
-}
+No label → binary stem + parent PID + atomic counter.
+
+Do not infer Rust test function names.
+
+- [ ] **Step 8: Implement failure-first write order**
+
+`capture_failure_best_effort(error_text)`:
+
+```text
+create directory
+→ write failure.json
+→ write current stdout.log/stderr.log
+→ attempt screenshot
+→ attempt world snapshot
 ```
 
-Do not infer the Rust test function name.
+After child teardown, refresh stdout/stderr so late output is preserved.
 
-- [ ] **Step 8: Run artifact tests**
+Remote failures are appended to diagnostic metadata/logging but do not cause this helper to panic/return over the primary failure.
+
+- [ ] **Step 9: Verify artifacts**
 
 ```bash
 cargo test --features fixture --test artifacts -- --test-threads=1
 ```
 
-Expected: PASS, including decoded visible screenshot content.
+Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add src/artifacts.rs src/game.rs src/process.rs src/error.rs tests/artifacts.rs
@@ -1022,31 +1083,30 @@ git commit -m "feat: capture bevy e2e diagnostics"
 
 ---
 
-### Task 8: Guarantee automatic diagnostics for returned errors and panics
+### Task 8: Guarantee failure artifacts for Err, panic, and dead child
 
 **Files:**
 - Create: `tests/failure_harness.rs`
 - Modify: `src/lib.rs`
 - Modify: `src/game.rs`
 - Modify: `src/artifacts.rs`
+- Modify: `tests/fixtures/minimal_game.rs`
 
 **Interfaces:**
-- `run()` captures diagnostics before teardown for closure `Err` and panic.
-- Cleanup/diagnostic failure never replaces the original failure.
-- Panic payload is resumed unchanged with `resume_unwind`.
+- `run()` preserves original `Err`/panic.
+- dead-child failure still emits local metadata/output files.
 
-- [ ] **Step 1: Add ignored helper tests that intentionally fail inside `run()`**
+- [ ] **Step 1: Add ignored returned-error and panic helpers**
 
-`tests/failure_harness.rs`:
+Inside `tests/failure_harness.rs`:
 
 ```rust
 #[test]
 #[ignore]
 fn helper_returns_error() {
-    let result = bevy_e2e::run(fixture_options("returned-error"), |_game| {
+    bevy_e2e::run(fixture_options("returned-error"), |_game| {
         Err(bevy_e2e::Error::Configuration("intentional returned error".into()))
-    });
-    result.unwrap();
+    }).unwrap();
 }
 
 #[test]
@@ -1058,58 +1118,97 @@ fn helper_panics() {
 }
 ```
 
-The non-ignored harness tests spawn the current test binary with `--ignored --exact <helper>`, expect non-zero exit, then inspect the helper's dedicated artifact root.
+Outer tests spawn the current test binary with `--ignored --exact`.
 
-- [ ] **Step 2: Verify the harness fails before the hook is fully wired**
+- [ ] **Step 2: Add a dead-child helper**
+
+Use fixture:
+
+```text
+--exit-after-ready-ms=250
+```
+
+The fixture must print:
+- `fixture stdout before crash`;
+- `fixture stderr before crash`;
+
+then exit 42.
+
+Helper:
+
+```rust
+#[test]
+#[ignore]
+fn helper_child_exits_mid_test() {
+    let options = fixture_options("dead-child")
+        .arg("--exit-after-ready-ms=250");
+
+    bevy_e2e::run(options, |game| {
+        std::thread::sleep(Duration::from_millis(400));
+        game.exists("player")?;
+        Ok(())
+    }).unwrap();
+}
+```
+
+Outer harness expects helper failure and checks:
+- `failure.json` exists;
+- `stdout.log` contains the stdout marker;
+- `stderr.log` contains the stderr marker;
+- screenshot/world files are optional because BRP is dead.
+
+- [ ] **Step 3: Verify harness fails before automatic capture is complete**
 
 ```bash
 cargo test --features fixture --test failure_harness -- --test-threads=1
 ```
 
-Expected: outer harness failure because the expected bundle is absent/incomplete.
+Expected: outer harness failure due missing/incomplete bundles.
 
-- [ ] **Step 3: Complete returned-error capture**
+- [ ] **Step 4: Complete `run()` failure handling**
 
-Implement:
+Returned `Err`:
 
 ```text
-format original error
-→ game.capture_failure_best_effort
-→ game.shutdown best effort
-→ return the original Error value unchanged
+preserve Error value
+→ capture failure best effort
+→ shutdown/reap best effort
+→ return original Error
 ```
 
-Do not wrap the primary error in an artifact/cleanup error.
-
-- [ ] **Step 4: Complete panic capture**
-
-Implement:
+Panic:
 
 ```text
-catch original payload
-→ derive diagnostic text only for &str/String payloads, otherwise "panic"
+preserve panic payload
 → capture failure best effort
-→ shutdown best effort
+→ shutdown/reap best effort
 → resume_unwind(original payload)
 ```
 
-- [ ] **Step 5: Assert the child PID is gone**
+Dead child:
+- local failure metadata/output must still be written;
+- remote artifact failure must not replace the BRP/child-exit failure.
 
-Include the child PID in `failure.json`. The outer harness uses a small cross-platform Rust process-existence check to verify the PID no longer represents a live fixture after helper exit.
+- [ ] **Step 5: Add PID cleanup assertions**
 
-- [ ] **Step 6: Run failure and normal suites**
+Failure metadata records child PID. Outer harness verifies it is no longer alive after helper process exits.
+
+Use a small cross-platform Rust helper rather than a Unix-only shell call.
+
+- [ ] **Step 6: Run harness + normal suite**
 
 ```bash
 cargo test --features fixture --test failure_harness -- --test-threads=1
-cargo test --features fixture -- --test-threads=1
+cargo test --features fixture --tests -- --test-threads=1
 ```
 
-Expected: PASS; intentionally failing helpers run only as subprocesses controlled by the harness.
+Expected: PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/lib.rs src/game.rs src/artifacts.rs tests/failure_harness.rs
+git add src/lib.rs src/game.rs src/artifacts.rs \
+  tests/failure_harness.rs tests/fixtures/minimal_game.rs
 git commit -m "test: guarantee e2e failure diagnostics"
 ```
 
@@ -1124,14 +1223,16 @@ git commit -m "test: guarantee e2e failure diagnostics"
 - Modify: `Cargo.toml`
 
 **Interfaces:**
-- Linux and Windows run the same serialized rendered behavioral suite.
-- Linux uses Xvfb.
-- Screenshot content validation is part of both rendered gates.
-- Package/feature checks prove client-only and runtime-only configurations.
+- Linux/Windows release gates.
+- Serialized rendered suite.
+- Package/docs explain feature split and concurrency precisely.
 
-- [ ] **Step 1: Document consumer feature setup precisely**
+- [ ] **Step 1: Document consumer setup**
 
 README must include:
+
+1. Bevy 0.19.x / Rust 1.95+.
+2. runtime-only dependency:
 
 ```toml
 [features]
@@ -1142,54 +1243,57 @@ bevy_e2e = {
   version = "0.1",
   optional = true,
   default-features = false,
-  features = ["runtime"]
+  features = ["runtime"],
 }
 
 [dev-dependencies]
 bevy_e2e = "0.1"
 ```
 
-Also document:
+3. feature-gated `BevyE2EPlugin`.
+4. `E2eId`.
+5. reflection registration.
+6. minimal `run()` test.
+7. `cargo test --features e2e --test e2e`.
+8. artifact layout.
+9. raw one-response `brp()`.
+10. unsupported watch/SSE.
+11. no generic headless mode.
+12. concurrency wording:
+    - main BRP uses per-child ports;
+    - framework does not promise rendered consumer parallelism;
+    - its own CI serializes rendered tests for stability;
+    - Task 4's two-child test pins observed Bevy 0.19 behavior.
 
-1. Bevy 0.19.x / Rust 1.95+ compatibility.
-2. feature-gated `BevyE2EPlugin` registration.
-3. `E2eId::new(...)` usage.
-4. reflected component/resource registration.
-5. a minimal synchronous `bevy_e2e::run(...)` test.
-6. rendered invocation with `--test-threads=1` for v0.1.
-7. the fixed Bevy render BRP port 15703 reason for serialization.
-8. failure artifact directory.
-9. raw one-response `game.brp(...)` escape hatch and explicit lack of SSE watch-stream API.
-10. v0.1 deferrals: no headless switch, process pool, assertion DSL, world picking, other-language client, or MCP integration.
+Do not state fixed render port 15703 alone as a reason consumer tests must be serialized.
 
-Keep README consumer-focused; do not duplicate the entire spec.
+- [ ] **Step 2: Set package exclusions conservatively**
 
-- [ ] **Step 2: Keep the fixture target non-default without fighting Cargo packaging**
-
-Retain:
+Exclude generated/local-only paths such as:
 
 ```toml
-[[bin]]
-name = "bevy-e2e-fixture"
-path = "tests/fixtures/minimal_game.rs"
-required-features = ["fixture"]
+exclude = [
+  ".github/",
+  "test_output/",
+  "target/",
+  "docs/superpowers/plans/",
+]
 ```
 
-Do not make `fixture` a default feature. Package exclusions should remove generated output (`test_output`, `target/e2e-test-output`) and CI-only transient files. Do not require fixture source itself to disappear from `cargo package --list` if Cargo target verification needs it; the contract is that ordinary consumers do not build the fixture target.
+Do **not** exclude `tests/fixtures/minimal_game.rs` while the manifest explicitly references it as a `[[bin]]` target.
 
 Verify:
 
 ```bash
 cargo package --allow-dirty --list
-cargo check --no-default-features --features client
-cargo check --no-default-features --features runtime
+cargo package --allow-dirty
 ```
 
-Expected: feature configurations compile and no generated artifact directories are packaged.
+Expected: package verifies successfully and non-default fixture target is not built for normal consumers.
 
-- [ ] **Step 3: Add serialized Linux/Windows rendered CI**
+- [ ] **Step 3: Add Linux/Windows CI**
 
-`.github/workflows/ci.yml` uses:
+Matrix:
 
 ```yaml
 strategy:
@@ -1197,77 +1301,70 @@ strategy:
     os: [ubuntu-latest, windows-latest]
 ```
 
-Install Rust 1.95.0. Linux installs Xvfb and Bevy's required native packages.
+Install Rust 1.95.
 
-Run on both OSes:
+Linux installs native packages required by Bevy's `ui` profile/X11/Xvfb.
+
+Run unit/static gates:
 
 ```text
 cargo fmt --check
-cargo clippy --all-targets --features fixture -- -D warnings
-cargo check --no-default-features --features client
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --lib
 cargo check --no-default-features --features runtime
-cargo test --features fixture -- --test-threads=1
-cargo package --allow-dirty
+cargo package
 ```
 
-On Linux wrap the rendered `cargo test` command in `xvfb-run -a`.
+Rendered gate:
+- Linux: `xvfb-run -a cargo test --features fixture --tests -- --test-threads=1`
+- Windows: `cargo test --features fixture --tests -- --test-threads=1`
 
-Do not run the fixture test harness with default parallel test threads.
+The two-child concurrency experiment remains one test inside this serialized harness.
 
-- [ ] **Step 4: Make visible screenshots a release gate**
+- [ ] **Step 4: Make screenshot visibility a hard gate**
 
-Do not add CI conditionals that skip `tests/artifacts.rs` on Windows or accept uniform/black pixels. The existing screenshot-content test must run on both Linux/Xvfb and Windows.
+Do not skip the artifact screenshot test on Windows.
 
-If Windows hosted rendering cannot create a real visible surface, the CI job should fail and the platform contract must be revisited in the spec; do not weaken the assertion to PNG magic bytes.
+If a runner produces uniform/black output, the job fails; diagnose adapter/window visibility rather than weakening the assertion.
 
-- [ ] **Step 5: Add survivor checks**
+- [ ] **Step 5: Add survivor scans**
 
-`scripts/assert_no_fixture_processes.sh` checks for remaining `bevy-e2e-fixture` processes on Linux and exits non-zero when found. Windows CI performs equivalent PowerShell `Get-Process` logic.
+Linux script rejects remaining `bevy-e2e-fixture` processes.
 
-Run survivor checks with `if: always()` so they execute after test failures.
+Windows uses `Get-Process` equivalent.
+
+Run with `if: always()` after rendered tests.
 
 - [ ] **Step 6: Upload failure artifacts**
 
-On CI failure upload:
+On CI failure upload `test_output/**` / `target/e2e-test-output/**` where present.
 
-```text
-test_output/**
-target/e2e-test-output/**
-```
+- [ ] **Step 7: Run local final gate**
 
-Do not upload successful-run artifacts by default.
-
-- [ ] **Step 7: Run the complete local gate**
-
-macOS/Windows desktop:
+Desktop:
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets --features fixture -- -D warnings
-cargo check --no-default-features --features client
-cargo check --no-default-features --features runtime
-cargo test --features fixture -- --test-threads=1
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --lib
+cargo test --features fixture --tests -- --test-threads=1
 cargo package --allow-dirty
 ```
 
-Linux:
+Linux rendered form:
 
 ```bash
-cargo fmt --check
-cargo clippy --all-targets --features fixture -- -D warnings
-cargo check --no-default-features --features client
-cargo check --no-default-features --features runtime
-xvfb-run -a cargo test --features fixture -- --test-threads=1
-cargo package --allow-dirty
+xvfb-run -a cargo test --features fixture --tests -- --test-threads=1
 ./scripts/assert_no_fixture_processes.sh
 ```
 
-Expected: all commands succeed and no fixture process remains.
+Expected: all pass.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add Cargo.toml README.md .github/workflows/ci.yml scripts/assert_no_fixture_processes.sh
+git add Cargo.toml README.md .github/workflows/ci.yml \
+  scripts/assert_no_fixture_processes.sh
 git commit -m "ci: validate bevy e2e on linux and windows"
 ```
 
@@ -1275,35 +1372,43 @@ git commit -m "ci: validate bevy e2e on linux and windows"
 
 ## Final Verification Before Marking the Feature PR Ready
 
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo clippy --all-targets --features fixture -- -D warnings` passes.
-- [ ] `cargo check --no-default-features --features client` passes.
-- [ ] `cargo check --no-default-features --features runtime` passes.
-- [ ] Full rendered tests pass with `--test-threads=1`.
-- [ ] `cargo package --allow-dirty --list` contains no generated E2E output.
-- [ ] `BrpClient` uses Bevy `BrpRequest`, remains crate-private, and unit-tests JSON success/error plus explicit SSE rejection.
-- [ ] Selector tests cover zero, one, and multiple `E2eId` matches.
-- [ ] Component/resource inspection uses built-in BRP reflection operations.
-- [ ] `wait_frames` reads `brp_extras/get_diagnostics.frame_count`; no `E2eFrame`/protocol resource exists.
-- [ ] Input tests prove Bevy observed keyboard/mouse/UI behavior rather than direct state mutation.
-- [ ] `click(id)` uses only `UiGlobalTransform` translation + primary-window scale factor; no `ComputedNode` geometry path exists.
-- [ ] Screenshot request uses `brp_extras/screenshot` as a terminal JSON call and the fixture screenshot test verifies visible/non-uniform pixels.
-- [ ] Raw `Game::brp` invokes at least one unwrapped one-response method and rejects an SSE/watch response clearly.
-- [ ] Panic and returned-`Err` helpers both produce diagnostics while preserving the primary failure.
-- [ ] Shutdown and force-kill paths both reap their child.
-- [ ] Linux/Xvfb and Windows rendered CI pass serialized.
-- [ ] Survivor checks report zero leaked fixture processes.
-- [ ] No custom BRP method was added.
-- [ ] No deferred scope (pooling, async API, watch-stream API, assertion DSL, world picking, gamepad/touch/IME, headless switch, MCP, multi-Bevy support) slipped into the PR.
+- [ ] `cargo fmt --check`
+- [ ] `cargo clippy --all-targets --all-features -- -D warnings`
+- [ ] `cargo test --lib`
+- [ ] `cargo check --no-default-features --features runtime`
+- [ ] `cargo build --features fixture --bin bevy-e2e-fixture`
+- [ ] full rendered integration suite passes serialized
+- [ ] runtime-only dependency tree excludes `ureq`
+- [ ] no custom BRP methods
+- [ ] `BrpClient` uses `BrpRequest` and rejects SSE
+- [ ] selector zero/one/many tests pass
+- [ ] `wait_frames` uses extras diagnostics
+- [ ] keyboard tests prove `ButtonInput<KeyCode>`
+- [ ] mouse tests prove `ButtonInput<MouseButton>`
+- [ ] UI click proves `Interaction`/button behavior
+- [ ] cursor test proves `Window::cursor_position()`
+- [ ] `UiGlobalTransform` array shape is pinned
+- [ ] screenshot test requires visible/non-uniform pixels
+- [ ] marked-world query uses `ComponentSelector::All` only for E2E-marked entities
+- [ ] returned-Err, panic, and dead-child harnesses all produce expected local diagnostics
+- [ ] dead-child bundle does not require screenshot/world
+- [ ] shutdown and force-kill reap children
+- [ ] two-child main-BRP experiment is recorded by a real test, not inferred from render port
+- [ ] rendered CI remains serialized for stability
+- [ ] no hidden startup relaunch/log scraping
+- [ ] package verifies
+- [ ] survivor scans report no leaked fixture processes
+- [ ] no deferred scope entered the PR
 
 ## Self-review
 
-- **Spec coverage:** Tasks 1–9 cover all revised v0.1 acceptance criteria.
-- **Review finding 1:** Screenshot SSE premise rejected after source verification: Bevy HTTP emits SSE only for method names containing `+watch`; `brp_extras/screenshot` has no such suffix and returns the first watching-handler result as ordinary JSON. The valid reuse part is adopted: `BrpClient` uses Bevy `BrpRequest`. Long-lived watch streams remain deferred.
-- **Review finding 2:** Adopted. `click(id)` copies Bevy 0.19's `UiGlobalTransform` translation + scale-factor path; `ComputedNode` is removed.
-- **Review finding 3:** Adopted more aggressively. Both `E2eFrame` and `E2eRuntimeInfo` are removed; extras diagnostics owns readiness/frame count.
-- **Review finding 4:** Adopted. One crate now has client/runtime features; runtime-only consumers do not enable `ureq`.
-- **Review finding 5:** Adopted. No rendered parallelism claim/test remains; rendered suites are serialized and screenshots validate pixels.
-- **Plan gaps:** Fixed: waits have their own test target and verification command; client tests are private unit tests; fixture bin has a non-default required feature; package checks no longer demand impossible fixture-source removal.
-- **Scope:** Still one coherent implementation PR. No new platform, transport, test runner, compatibility layer, or MCP work was added.
-- **Placeholders:** No TBD/TODO implementation placeholders remain.
+- **Spec coverage:** Tasks 1–9 cover every revised acceptance criterion.
+- **Input correctness:** Task 6 mirrors Bevy winit's dual typed/aggregate message delivery for held input and reuses extras for cursor state.
+- **Fixture build:** rendered-only Bevy features live behind `fixture`; base client no longer enables render/UI.
+- **Concurrency:** a two-child test replaces the previous inference from fixed render port; CI serialization remains a stability choice.
+- **Failure resilience:** Task 8 covers a dead child and only requires local artifacts when BRP is unavailable.
+- **Private tests:** activation parser and BRP client remain private unit-tested implementation details.
+- **World snapshot:** Bevy 0.19 `ComponentSelector::All` is used explicitly; no invented wildcard or N+1 component loop.
+- **UI transform:** the official Bevy 0.19.1 remote integration shape is used and pinned by a fixture test.
+- **Startup:** no fragile log scraping and no silent automatic game relaunch.
+- **Scope:** one package, one implementation PR, no extra protocol/platform/framework.

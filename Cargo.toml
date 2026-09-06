@@ -1,0 +1,74 @@
+[package]
+name = "bevy_e2e"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cwchanap/bevy-e2e"
+description = "Out-of-process end-to-end testing for Bevy games"
+
+exclude = [
+  ".github/",
+  "test_output/",
+  "target/",
+  "docs/superpowers/plans/",
+]
+
+[features]
+default = ["client"]
+client = ["dep:ureq"]
+runtime = ["dep:bevy_brp_extras"]
+fixture = ["runtime", "bevy/ui", "bevy/png"]
+
+[dependencies]
+bevy = { version = "0.19.1", default-features = false, features = [
+  "bevy_remote",
+  "serialize",
+  "bevy_window",
+] }
+bevy_brp_extras = { version = "0.22.3", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ureq = { version = "3", features = ["json"], optional = true }
+
+[dev-dependencies]
+image = "0.25"
+tiny_http = "0.12"
+
+[[bin]]
+name = "bevy-e2e-fixture"
+path = "tests/fixtures/minimal_game.rs"
+required-features = ["fixture"]
+
+[[test]]
+name = "public_api"
+required-features = ["client"]
+
+[[test]]
+name = "lifecycle"
+required-features = ["fixture"]
+
+[[test]]
+name = "selectors"
+required-features = ["fixture"]
+
+[[test]]
+name = "inspection"
+required-features = ["fixture"]
+
+[[test]]
+name = "waits"
+required-features = ["fixture"]
+
+[[test]]
+name = "input"
+required-features = ["fixture"]
+
+[[test]]
+name = "artifacts"
+required-features = ["fixture"]
+
+[[test]]
+name = "failure_harness"
+required-features = ["fixture"]

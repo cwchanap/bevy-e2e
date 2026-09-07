@@ -5,6 +5,10 @@ on:
     branches: [main, master, "feat/**"]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     name: lint (${{ matrix.os }})

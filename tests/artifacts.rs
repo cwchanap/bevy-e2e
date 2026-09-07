@@ -115,3 +115,48 @@ fn capture_artifacts_writes_expected_bundle_without_failure_json() {
     assert!(world.get("frame_count").is_some());
     assert!(world.get("entities").and_then(|v| v.as_array()).is_some());
 }
+
+#[test]
+fn capture_artifacts_clears_stale_bundle_files_on_rerun() {
+    // Regression: `create_session_dir` reuses an existing `<root>/<label>` dir, so
+    // a rerun with the same `artifact_label` must clear stale optional bundle
+    // files (notably a prior `failure.json`) rather than retaining them. This test
+    // deliberately does NOT clear the dir beforehand; it seeds stale files and
+    // asserts they are gone after a fresh capture with the same label.
+    let root = PathBuf::from("test_output/artifacts_rerun");
+    let label = "rerun";
+    let game = Game::launch(fixture_options(&root)).unwrap();
+    game.wait_for("main_menu.play").unwrap();
+    game.wait_frames(2).unwrap();
+
+    let dir = game.capture_artifacts(label).unwrap();
+    // Seed a stale `failure.json` (as a prior dead-child failure would leave)
+    // plus stale content in a known bundle file. The fresh non-failure capture
+    // must clear `failure.json` and overwrite the rest.
+    let stale_failure = dir.join("failure.json");
+    std::fs::write(&stale_failure, r#"{"error":"stale"}"#).unwrap();
+    let stale_world = dir.join("world.json");
+    std::fs::write(&stale_world, r#"{"stale":true}"#).unwrap();
+    assert!(stale_failure.exists(), "seed stale failure.json");
+
+    let dir2 = game.capture_artifacts(label).unwrap();
+    assert_eq!(dir, dir2, "same label must map to same session dir");
+
+    assert!(
+        !stale_failure.exists(),
+        "stale failure.json must be cleared before fresh non-failure capture"
+    );
+    for name in ["screenshot.png", "world.json", "stdout.log", "stderr.log"] {
+        assert!(
+            dir.join(name).is_file(),
+            "missing fresh {name} at {}",
+            dir.display()
+        );
+    }
+    let world: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("world.json")).unwrap()).unwrap();
+    assert!(
+        world.get("frame_count").is_some(),
+        "world.json must be fresh, not stale: {world}"
+    );
+}

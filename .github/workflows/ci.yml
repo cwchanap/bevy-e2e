@@ -6,8 +6,8 @@ on:
   pull_request:
 
 jobs:
-  test:
-    name: ${{ matrix.os }}
+  lint:
+    name: lint (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -64,6 +64,47 @@ jobs:
       - name: cargo package
         if: github.event_name == 'push'
         run: cargo package
+
+  fixture:
+    name: fixture (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux native deps (Bevy ui / X11 / Xvfb)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            build-essential \
+            xvfb \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libasound2-dev \
+            libudev-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            mesa-vulkan-drivers \
+            libegl1-mesa-dev
 
       - name: Rendered fixture tests (Linux / Xvfb, serialized)
         if: runner.os == 'Linux'

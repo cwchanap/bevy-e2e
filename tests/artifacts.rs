@@ -1,9 +1,38 @@
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    thread,
+    time::{Duration, Instant},
+};
 
 use bevy_e2e::{E2eLaunchOptions, Game, cargo_bin};
 
 fn fixture_options(artifact_root: impl Into<PathBuf>) -> E2eLaunchOptions {
     E2eLaunchOptions::new(cargo_bin!("bevy-e2e-fixture")).artifact_root(artifact_root)
+}
+
+/// Upper bound for waiting on the first *presented* render frame.
+///
+/// GPU-backed hosts present within a couple of frames, but CI runners without a
+/// GPU fall back to a software adapter (e.g. Windows "Microsoft Basic Render
+/// Driver" / WARP via DX12) that is far slower to surface its first frame. A
+/// fixed `wait_frames` count that works on a fast GPU can capture a
+/// zero-initialized (pure-black) texture on a slow one. Polling until the
+/// capture is non-uniform expresses the actual requirement directly and is
+/// independent of adapter speed.
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// True when the decoded screenshot contains more than one distinct pixel
+/// color (i.e. the renderer has presented real content, not a blank texture).
+fn screenshot_has_visible_content(path: &std::path::Path) -> bool {
+    let Ok(image) = image::open(path) else {
+        return false;
+    };
+    let image = image.to_rgb8();
+    if image.width() == 0 || image.height() == 0 {
+        return false;
+    }
+    let first = image.get_pixel(0, 0);
+    image.pixels().any(|pixel| pixel != first)
 }
 
 #[test]
@@ -12,9 +41,22 @@ fn screenshot_captures_non_uniform_rendered_content() {
     let game = Game::launch(fixture_options(&root)).unwrap();
 
     game.wait_for("main_menu.play").unwrap();
-    game.wait_frames(2).unwrap();
 
-    let path = game.screenshot("menu").unwrap();
+    // Poll for a non-uniform capture rather than assuming a fixed frame count
+    // is enough for the first frame to be presented on every adapter.
+    let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
+    let path = loop {
+        game.wait_frames(2).unwrap();
+        let candidate = game.screenshot("menu").unwrap();
+        if screenshot_has_visible_content(&candidate) || Instant::now() >= deadline {
+            // On timeout, keep the last capture so the assertions below report
+            // the real failure (uniform/black pixels) instead of a generic
+            // timeout message.
+            break candidate;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+
     assert!(path.exists(), "screenshot path missing: {}", path.display());
     assert!(
         path.to_string_lossy().contains("menu"),

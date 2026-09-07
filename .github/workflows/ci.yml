@@ -23,6 +23,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
       - name: Install Linux native deps (Bevy ui / X11 / Xvfb)
         if: runner.os == 'Linux'
         run: |
@@ -53,12 +56,13 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: cargo test --lib
-        run: cargo test --lib
+        run: cargo test --all-features --lib
 
       - name: runtime-only check
         run: cargo check --no-default-features --features runtime
 
       - name: cargo package
+        if: github.event_name == 'push'
         run: cargo package
 
       - name: Rendered fixture tests (Linux / Xvfb, serialized)

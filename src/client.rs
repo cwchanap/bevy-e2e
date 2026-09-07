@@ -38,9 +38,18 @@ impl BrpClient {
             .timeout_global(Some(self.timeout))
             .build()
             .send_json(&request)
-            .map_err(|error| Error::Brp {
-                method: method.to_owned(),
-                message: error.to_string(),
+            .map_err(|error| match error {
+                // A per-request timeout is transient for polling loops; surface it
+                // as Error::Timeout so callers like wait_for can retry within their
+                // own operation deadline instead of aborting on a Brp error.
+                ureq::Error::Timeout(_) => Error::Timeout {
+                    operation: format!("brp {method}"),
+                    timeout: self.timeout,
+                },
+                other => Error::Brp {
+                    method: method.to_owned(),
+                    message: other.to_string(),
+                },
             })?;
 
         let content_type = response

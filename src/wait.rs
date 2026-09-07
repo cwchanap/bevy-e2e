@@ -22,6 +22,10 @@ impl Game {
                 Err(Error::AmbiguousSelector(_)) => {
                     return Err(Error::AmbiguousSelector(id.to_owned()));
                 }
+                // A per-request timeout is transient; keep polling until our
+                // own operation deadline so a single slow BRP call (e.g. on a
+                // software renderer) doesn't abort the whole wait.
+                Err(Error::Timeout { .. }) => {}
                 Err(error) => return Err(error),
             }
             if Instant::now() >= deadline {
@@ -45,6 +49,8 @@ impl Game {
                 Err(Error::AmbiguousSelector(_)) => {
                     return Err(Error::AmbiguousSelector(id.to_owned()));
                 }
+                // Transient per-request timeout; keep polling.
+                Err(Error::Timeout { .. }) => {}
                 Err(error) => return Err(error),
             }
             if Instant::now() >= deadline {
@@ -66,34 +72,38 @@ impl Game {
         let deadline = Instant::now() + timeout;
 
         let baseline = loop {
-            match self.diagnostics_frame_count()? {
-                Some(count) => break count,
-                None => {
-                    if Instant::now() >= deadline {
-                        return Err(Error::Timeout {
-                            operation: "wait_frames(baseline frame_count)".to_owned(),
-                            timeout,
-                        });
-                    }
-                    thread::sleep(POLL_INTERVAL);
-                }
+            match self.diagnostics_frame_count() {
+                Ok(Some(count)) => break count,
+                Ok(None) => {}
+                // Transient per-request timeout; keep polling.
+                Err(Error::Timeout { .. }) => {}
+                Err(error) => return Err(error),
             }
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout {
+                    operation: "wait_frames(baseline frame_count)".to_owned(),
+                    timeout,
+                });
+            }
+            thread::sleep(POLL_INTERVAL);
         };
 
         let target = baseline.saturating_add(frames);
         loop {
-            match self.diagnostics_frame_count()? {
-                Some(current) if current >= target => return Ok(()),
-                Some(_) | None => {
-                    if Instant::now() >= deadline {
-                        return Err(Error::Timeout {
-                            operation: format!("wait_frames({frames})"),
-                            timeout,
-                        });
-                    }
-                    thread::sleep(POLL_INTERVAL);
-                }
+            match self.diagnostics_frame_count() {
+                Ok(Some(current)) if current >= target => return Ok(()),
+                Ok(Some(_)) | Ok(None) => {}
+                // Transient per-request timeout; keep polling.
+                Err(Error::Timeout { .. }) => {}
+                Err(error) => return Err(error),
             }
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout {
+                    operation: format!("wait_frames({frames})"),
+                    timeout,
+                });
+            }
+            thread::sleep(POLL_INTERVAL);
         }
     }
 
@@ -111,8 +121,13 @@ impl Game {
     {
         let deadline = Instant::now() + timeout;
         loop {
-            if predicate(self)? {
-                return Ok(());
+            match predicate(self) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                // Transient per-request timeout inside the predicate; keep
+                // polling until our own deadline.
+                Err(Error::Timeout { .. }) => {}
+                Err(error) => return Err(error),
             }
             if Instant::now() >= deadline {
                 return Err(Error::Timeout {

@@ -3,7 +3,7 @@ use std::{
     net::TcpListener,
     process::{Child, Command, ExitStatus, Stdio},
     sync::{Arc, Mutex},
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -16,6 +16,8 @@ pub struct ChildProcess {
     port: u16,
     stdout: Arc<Mutex<Vec<u8>>>,
     stderr: Arc<Mutex<Vec<u8>>>,
+    stdout_handle: Option<JoinHandle<()>>,
+    stderr_handle: Option<JoinHandle<()>>,
     exit_status: Option<ExitStatus>,
 }
 
@@ -46,12 +48,14 @@ impl ChildProcess {
         let stdout_buf = Arc::new(Mutex::new(Vec::new()));
         let stderr_buf = Arc::new(Mutex::new(Vec::new()));
 
-        if let Some(stdout) = child.stdout.take() {
-            spawn_drain(stdout, Arc::clone(&stdout_buf));
-        }
-        if let Some(stderr) = child.stderr.take() {
-            spawn_drain(stderr, Arc::clone(&stderr_buf));
-        }
+        let stdout_handle = child
+            .stdout
+            .take()
+            .map(|stdout| spawn_drain(stdout, Arc::clone(&stdout_buf)));
+        let stderr_handle = child
+            .stderr
+            .take()
+            .map(|stderr| spawn_drain(stderr, Arc::clone(&stderr_buf)));
 
         Ok(Self {
             child: Some(child),
@@ -59,6 +63,8 @@ impl ChildProcess {
             port,
             stdout: stdout_buf,
             stderr: stderr_buf,
+            stdout_handle,
+            stderr_handle,
             exit_status: None,
         })
     }
@@ -121,14 +127,32 @@ impl ChildProcess {
     pub fn reap(&mut self) -> Result<Option<ExitStatus>> {
         if let Some(status) = self.exit_status {
             self.child = None;
+            self.join_drains();
             return Ok(Some(status));
         }
         let Some(mut child) = self.child.take() else {
+            self.join_drains();
             return Ok(None);
         };
         let status = child.wait().map_err(Error::Spawn)?;
         self.exit_status = Some(status);
+        // `child.wait()` only synchronizes with the child process; the drain
+        // threads may still be copying buffered pipe data into the mutexes. Join
+        // them before returning so callers reading the buffers (e.g. the final
+        // `refresh_failure_output_logs` after shutdown) see the complete tail.
+        // The pipes hit EOF once the child exits, so the joins complete promptly.
+        self.join_drains();
         Ok(Some(status))
+    }
+
+    /// Join the stdout/stderr drain threads if still live, dropping the handles.
+    fn join_drains(&mut self) {
+        if let Some(handle) = self.stdout_handle.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.stderr_handle.take() {
+            let _ = handle.join();
+        }
     }
 
     pub fn stdout_snapshot(&self) -> String {
@@ -168,7 +192,10 @@ fn select_port() -> Result<u16> {
     Ok(port)
 }
 
-fn spawn_drain(mut reader: impl Read + Send + 'static, buffer: Arc<Mutex<Vec<u8>>>) {
+fn spawn_drain(
+    mut reader: impl Read + Send + 'static,
+    buffer: Arc<Mutex<Vec<u8>>>,
+) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut chunk = [0_u8; 4096];
         loop {
@@ -182,7 +209,7 @@ fn spawn_drain(mut reader: impl Read + Send + 'static, buffer: Arc<Mutex<Vec<u8>
                 Err(_) => break,
             }
         }
-    });
+    })
 }
 
 fn snapshot(buffer: &Arc<Mutex<Vec<u8>>>) -> String {

@@ -66,7 +66,6 @@ jobs:
         run: cargo check --no-default-features --features runtime
 
       - name: cargo package
-        if: github.event_name == 'push'
         run: cargo package
 
   fixture:

@@ -84,6 +84,12 @@ impl Game {
         let dir = self.artifact_root_path().join(name);
         fs::create_dir_all(&dir)
             .map_err(|error| Error::artifact_io("create artifact directory", error))?;
+        // `create_dir_all` reuses an existing directory verbatim, so a rerun with
+        // the same `artifact_label` would retain stale optional bundle files (e.g.
+        // a previous dead-child failure leaving `screenshot.png`/`world.json`, or an
+        // old `failure.json` surfacing in a non-failure `capture_artifacts`). Clear
+        // the known bundle files before writing a fresh bundle.
+        clear_bundle_files(&dir);
         Ok(dir)
     }
 
@@ -185,6 +191,20 @@ fn sanitize_label(label: &str) -> String {
         "session".to_owned()
     } else {
         out
+    }
+}
+
+/// Remove the known artifact bundle files from `dir` so a rerun with the same
+/// `artifact_label` cannot retain stale optional files from a prior capture.
+fn clear_bundle_files(dir: &Path) {
+    for name in [
+        "screenshot.png",
+        "world.json",
+        "stdout.log",
+        "stderr.log",
+        "failure.json",
+    ] {
+        let _ = fs::remove_file(dir.join(name));
     }
 }
 

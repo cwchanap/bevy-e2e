@@ -214,8 +214,16 @@ fn exit_after_ready(
     time: Res<Time>,
     config: Res<ExitAfterReady>,
     mut exit: MessageWriter<AppExit>,
+    // Elapsed time captured on the first Update frame; the exit delay is
+    // measured from here, not from app start. Pre-first-frame Bevy/renderer
+    // setup (slow on Windows WARP) can exceed the requested delay, so measuring
+    // from app start would exit the child before the harness observes
+    // readiness -- turning a "mid-test exit" into a launch failure that
+    // bypasses failure-artifact capture.
+    mut first_update_elapsed: Local<Option<Duration>>,
 ) {
-    if time.elapsed() >= config.delay {
+    let baseline = first_update_elapsed.get_or_insert_with(|| time.elapsed());
+    if time.elapsed().saturating_sub(*baseline) >= config.delay {
         // Prefer an explicit process exit so the harness sees code 42 even if
         // message-driven shutdown is delayed by window teardown.
         let _ = exit.write(AppExit::from_code(42));

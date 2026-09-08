@@ -29,7 +29,13 @@ pub struct Game {
 impl Game {
     /// Spawn the game binary and wait until `brp_extras/get_diagnostics` answers.
     ///
-    /// Does **not** silently relaunch on startup timeout.
+    /// Does **not** silently relaunch on startup timeout. If the child exits
+    /// while the readiness probe is in flight (e.g. a fixture run with
+    /// `--exit-after-ready-ms` on a slow renderer such as Windows WARP), returns
+    /// a [`Game`] holding the exited child so its stdout/stderr remain available
+    /// for failure capture; detect this with [`Game::is_running`]. [`run`]
+    /// handles this automatically and propagates [`Error::ChildExited`] after
+    /// capturing artifacts.
     pub fn launch(options: E2eLaunchOptions) -> Result<Self> {
         let startup_timeout = options.startup_timeout_value();
         let shutdown_timeout = options.shutdown_timeout_value();
@@ -49,8 +55,14 @@ impl Game {
 
         let deadline = Instant::now() + startup_timeout;
         loop {
-            if let Some(status) = child.try_wait()? {
-                return Err(Error::ChildExited(status));
+            // If the child exited before readiness was observed, break out and
+            // return a `Game` holding the dead child. Dropping it here (the old
+            // `Err(ChildExited)` path) lost its stdout/stderr buffers, so `run`
+            // could not capture failure artifacts -- which made the dead-child
+            // fixture flaky on slow renderers where the child's
+            // `--exit-after-ready-ms` fired before the readiness probe answered.
+            if child.try_wait()?.is_some() {
+                break;
             }
 
             match client.request(READINESS_METHOD, json!({})) {
@@ -90,6 +102,23 @@ impl Game {
                 }
             }
         }
+
+        // Child exited while the readiness probe was in flight. Return a `Game`
+        // holding the exited child (with its drained stdout/stderr) so callers
+        // can still capture failure artifacts. `run` detects this via
+        // `is_running()` and propagates `Error::ChildExited` after capturing.
+        let client = BrpClient::new(child.port(), options.operation_timeout_value());
+        Ok(Self {
+            child,
+            client,
+            operation_timeout: options.operation_timeout_value(),
+            shutdown_timeout,
+            shut_down: false,
+            artifact_root: options.artifact_root_path().to_path_buf(),
+            artifact_label: options.artifact_label_value().map(str::to_owned),
+            binary_stem,
+            failure_dir: None,
+        })
     }
 
     pub fn is_running(&mut self) -> bool {
@@ -133,6 +162,12 @@ impl Game {
         self.child.pid()
     }
 
+    /// Cached exit status of the child, if it has already exited.
+    /// `is_running()` returning `false` implies `Some(status)` here.
+    pub(crate) fn child_exit_status(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+
     /// Graceful shutdown: BRP shutdown → wait → kill → reap. Idempotent.
     pub fn shutdown(&mut self) -> Result<()> {
         if self.shut_down {
@@ -171,6 +206,24 @@ where
     F: FnOnce(&mut Game) -> Result<()>,
 {
     let mut game = Game::launch(options)?;
+
+    // `Game::launch` returns a `Game` even if the child exited while the
+    // readiness probe was in flight (notably the dead-child fixture with
+    // `--exit-after-ready-ms` on slow Windows WARP runners, where the child can
+    // exit before the harness observes BRP readiness). Detect that here and
+    // capture failure artifacts before propagating `ChildExited`, so a child
+    // that dies during startup still produces `failure.json` + output logs
+    // instead of bypassing capture (which `?` on `Game::launch` used to do).
+    if !game.is_running() {
+        let status = game.child_exit_status()?.ok_or_else(|| {
+            Error::Configuration("child reported not running but no exit status".into())
+        })?;
+        let error = Error::ChildExited(status);
+        game.capture_failure_best_effort(&error.to_string());
+        let _ = game.shutdown();
+        game.refresh_failure_output_logs();
+        return Err(error);
+    }
 
     let outcome = catch_unwind(AssertUnwindSafe(|| test(&mut game)));
 

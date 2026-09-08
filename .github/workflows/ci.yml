@@ -5,6 +5,12 @@ on:
     branches: [main, master, "feat/**"]
   pull_request:
 
+# Least-privilege: this workflow only needs repository content read access.
+# `actions/upload-artifact@v4` does not require `actions: write` for standard
+# same-run uploads, so it is intentionally omitted.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true

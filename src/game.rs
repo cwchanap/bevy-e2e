@@ -39,10 +39,7 @@ impl Game {
     pub fn launch(options: E2eLaunchOptions) -> Result<Self> {
         let startup_timeout = options.startup_timeout_value();
         let shutdown_timeout = options.shutdown_timeout_value();
-        // Keep readiness probes snappy; connection-refused fails fast anyway.
-        let probe_timeout = options
-            .operation_timeout_value()
-            .min(Duration::from_millis(200));
+        let operation_timeout = options.operation_timeout_value();
 
         let binary_stem = options
             .binary()
@@ -51,7 +48,6 @@ impl Game {
             .unwrap_or_else(|| "game".to_owned());
 
         let mut child = ChildProcess::spawn(&options)?;
-        let client = BrpClient::new(child.port(), probe_timeout);
 
         let deadline = Instant::now() + startup_timeout;
         loop {
@@ -65,10 +61,33 @@ impl Game {
                 break;
             }
 
-            match client.request(READINESS_METHOD, json!({})) {
+            // Bound each readiness probe by the *remaining* startup duration so a
+            // short `startup_timeout` cannot let a single probe block past the
+            // startup deadline (e.g. when `startup_timeout` < `probe_timeout`).
+            // Keep probes snappy regardless; connection-refused fails fast anyway.
+            let now = Instant::now();
+            let probe_result = match deadline.checked_duration_since(now) {
+                Some(remaining) if remaining > Duration::ZERO => {
+                    let probe_timeout = remaining
+                        .min(operation_timeout)
+                        .min(Duration::from_millis(200));
+                    let probe_client = BrpClient::new(child.port(), probe_timeout);
+                    probe_client.request(READINESS_METHOD, json!({}))
+                }
+                // Deadline already reached: synthesize a timeout so the branch
+                // below captures artifacts and returns `Error::Timeout`.
+                _ => Err(Error::Timeout {
+                    operation: "startup".to_owned(),
+                    timeout: startup_timeout,
+                }),
+            };
+
+            match probe_result {
                 Ok(_result) => {
-                    // Null frame_count is acceptable; any successful JSON result means ready.
-                    let client = BrpClient::new(child.port(), options.operation_timeout_value());
+                    // Null frame_count is acceptable; any successful JSON result
+                    // means ready. The probe was bounded by the remaining startup
+                    // duration, so a response here arrived within the deadline.
+                    let client = BrpClient::new(child.port(), operation_timeout);
                     return Ok(Self {
                         child,
                         client,
@@ -86,7 +105,7 @@ impl Game {
                         let stdout = child.stdout_snapshot();
                         let stderr = child.stderr_snapshot();
                         let _ = child.kill();
-                        let _ = child.reap();
+                        let _ = child.reap(shutdown_timeout);
                         return Err(Error::Timeout {
                             operation: format!(
                                 "startup (stdout_len={}, stderr_len={})\n--- stdout ---\n{}\n--- stderr ---\n{}",
@@ -181,7 +200,7 @@ impl Game {
             }
         }
 
-        let _ = self.child.reap()?;
+        let _ = self.child.reap(self.shutdown_timeout)?;
         self.shut_down = true;
         Ok(())
     }
@@ -193,7 +212,7 @@ impl Drop for Game {
             return;
         }
         let _ = self.child.kill();
-        let _ = self.child.reap();
+        let _ = self.child.reap(self.shutdown_timeout);
         self.shut_down = true;
     }
 }

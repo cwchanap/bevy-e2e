@@ -17,8 +17,12 @@ exclude = [
 [features]
 default = ["client"]
 client = ["dep:ureq"]
-runtime = ["dep:bevy_brp_extras"]
-fixture = ["runtime", "bevy/ui", "bevy/png"]
+# `runtime` enables the in-game BRP extras plugin, including PNG screenshot
+# capture (`brp_extras/screenshot`), which requires Bevy's `png` image format
+# feature. A consumer that disables Bevy default features still gets working
+# screenshots.
+runtime = ["dep:bevy_brp_extras", "bevy/png"]
+fixture = ["runtime", "bevy/ui"]
 
 [dependencies]
 bevy = { version = "0.19.1", default-features = false, features = [

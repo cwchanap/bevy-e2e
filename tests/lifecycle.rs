@@ -44,7 +44,7 @@ fn force_kill_reaps_sleep_forever_child() {
         bevy_e2e::ChildProcess::spawn(&fixture_options().arg("--sleep-forever")).unwrap();
     assert!(child.try_wait().unwrap().is_none());
     child.kill().unwrap();
-    let status = child.reap().unwrap();
+    let status = child.reap(std::time::Duration::from_secs(2)).unwrap();
     assert!(status.is_some(), "force-kill must reap an exit status");
     assert!(!child.is_running());
 }

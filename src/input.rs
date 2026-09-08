@@ -296,10 +296,16 @@ mod tests {
             Error::Timeout { .. }
         ));
 
-        // Construct a synthetic ExitStatus via a finished process on Unix.
-        let status: ExitStatus = std::process::Command::new("true")
-            .status()
-            .expect("spawn true");
+        // Construct a synthetic ExitStatus via a finished process. `true` is not
+        // available on Windows, so select a platform-available successful command.
+        let mut command = if cfg!(windows) {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/C", "exit", "0"]);
+            command
+        } else {
+            std::process::Command::new("true")
+        };
+        let status: ExitStatus = command.status().expect("spawn successful command");
         let child = Error::ChildExited(status);
         assert!(matches!(
             map_click_component_error("x", child),

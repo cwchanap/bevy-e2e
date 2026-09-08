@@ -91,18 +91,22 @@ Build the game under test with your `e2e` feature enabled so `BevyE2EPlugin` is 
 cargo test --features e2e --test e2e
 ```
 
+`BevyE2EPlugin` owns the BRP HTTP transport (it sets up `bevy_brp_extras` on the port chosen by the harness via `BRP_EXTRAS_PORT`). Do **not** register `RemoteHttpPlugin` or `RemotePlugin` separately in the game — `bevy_brp_extras` ignores `BRP_EXTRAS_PORT` when an HTTP transport is already present, which would make the harness poll the wrong endpoint until startup times out.
+
 ## Artifacts
 
 Default artifact root is `test_output/` (override with `E2eLaunchOptions::artifact_root`).
 
-Explicit capture (`screenshot` / `capture_artifacts`) writes under a labeled session directory:
+Explicit capture writes under a labeled session directory. `Game::screenshot`
+writes only the PNG; `Game::capture_artifacts` additionally writes the world
+snapshot and output logs:
 
 ```text
 test_output/<label>/
   screenshot.png
   world.json          # capture_artifacts only
-  stdout.log
-  stderr.log
+  stdout.log          # capture_artifacts only
+  stderr.log          # capture_artifacts only
 ```
 
 On `run()` failure the harness best-effort writes:

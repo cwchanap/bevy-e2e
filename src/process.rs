@@ -2,23 +2,81 @@ use std::{
     io::Read,
     net::TcpListener,
     process::{Child, Command, ExitStatus, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 use crate::{Error, Result, options::E2eLaunchOptions};
 
+/// Tail cap for each captured child output stream. A fixture that logs
+/// continuously during a wait cannot exhaust the test runner's memory; only the
+/// most recent tail is retained and a truncation marker is recorded.
+const MAX_CAPTURED_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Default drain-join grace used when no shutdown timeout is in scope (`Drop`).
+/// The normal case (pipe EOFs when the child exits) completes in milliseconds;
+/// this only bounds the pathological case where a helper process inherited the
+/// pipe write-end and keeps it open after the game exited.
+const DEFAULT_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
 /// OS child process wrapper: port probe, spawn, stdout/stderr drain, wait/kill/reap.
 pub struct ChildProcess {
     child: Option<Child>,
     pid: u32,
     port: u16,
-    stdout: Arc<Mutex<Vec<u8>>>,
-    stderr: Arc<Mutex<Vec<u8>>>,
-    stdout_handle: Option<JoinHandle<()>>,
-    stderr_handle: Option<JoinHandle<()>>,
+    stdout: Arc<Mutex<CapturedOutput>>,
+    stderr: Arc<Mutex<CapturedOutput>>,
+    stdout_drain: Option<DrainHandle>,
+    stderr_drain: Option<DrainHandle>,
     exit_status: Option<ExitStatus>,
+}
+
+/// A drain thread plus a completion flag so the join can be bounded.
+struct DrainHandle {
+    handle: JoinHandle<()>,
+    done: Arc<AtomicBool>,
+}
+
+/// Bounded, tail-truncating capture of one child output stream.
+struct CapturedOutput {
+    data: Vec<u8>,
+    truncated: bool,
+}
+
+impl CapturedOutput {
+    fn new() -> Self {
+        Self {
+            data: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    /// Append bytes, retaining only the most recent `MAX_CAPTURED_OUTPUT_BYTES`
+    /// tail and marking truncation when older bytes are discarded.
+    fn push(&mut self, bytes: &[u8]) {
+        self.data.extend_from_slice(bytes);
+        if self.data.len() > MAX_CAPTURED_OUTPUT_BYTES {
+            self.truncated = true;
+            let excess = self.data.len() - MAX_CAPTURED_OUTPUT_BYTES;
+            self.data.drain(..excess);
+        }
+    }
+
+    fn snapshot(&self) -> String {
+        let body = String::from_utf8_lossy(&self.data).into_owned();
+        if self.truncated {
+            format!(
+                "... [output truncated, showing last {} bytes]\n{}",
+                MAX_CAPTURED_OUTPUT_BYTES, body
+            )
+        } else {
+            body
+        }
+    }
 }
 
 impl ChildProcess {
@@ -45,14 +103,14 @@ impl ChildProcess {
         let mut child = command.spawn().map_err(Error::Spawn)?;
         let pid = child.id();
 
-        let stdout_buf = Arc::new(Mutex::new(Vec::new()));
-        let stderr_buf = Arc::new(Mutex::new(Vec::new()));
+        let stdout_buf = Arc::new(Mutex::new(CapturedOutput::new()));
+        let stderr_buf = Arc::new(Mutex::new(CapturedOutput::new()));
 
-        let stdout_handle = child
+        let stdout_drain = child
             .stdout
             .take()
             .map(|stdout| spawn_drain(stdout, Arc::clone(&stdout_buf)));
-        let stderr_handle = child
+        let stderr_drain = child
             .stderr
             .take()
             .map(|stderr| spawn_drain(stderr, Arc::clone(&stderr_buf)));
@@ -63,8 +121,8 @@ impl ChildProcess {
             port,
             stdout: stdout_buf,
             stderr: stderr_buf,
-            stdout_handle,
-            stderr_handle,
+            stdout_drain,
+            stderr_drain,
             exit_status: None,
         })
     }
@@ -124,43 +182,72 @@ impl ChildProcess {
     }
 
     /// Block until the child exits and clear the live handle (idempotent).
-    pub fn reap(&mut self) -> Result<Option<ExitStatus>> {
+    ///
+    /// `drain_timeout` bounds how long `reap` waits for the stdout/stderr drain
+    /// threads to finish after the child exits. The pipes normally hit EOF as
+    /// soon as the child exits, so the join completes in milliseconds. A game
+    /// that spawns a helper process inheriting the stdout/stderr pipe write-ends
+    /// can keep the drain thread blocked in `read()` after the game itself
+    /// exits; the bounded join detaches such a drain thread instead of hanging
+    /// `reap` (and the whole test/CI process) past the grace period.
+    pub fn reap(&mut self, drain_timeout: Duration) -> Result<Option<ExitStatus>> {
         if let Some(status) = self.exit_status {
             self.child = None;
-            self.join_drains();
+            self.join_drains_bounded(drain_timeout);
             return Ok(Some(status));
         }
         let Some(mut child) = self.child.take() else {
-            self.join_drains();
+            self.join_drains_bounded(drain_timeout);
             return Ok(None);
         };
         let status = child.wait().map_err(Error::Spawn)?;
         self.exit_status = Some(status);
         // `child.wait()` only synchronizes with the child process; the drain
         // threads may still be copying buffered pipe data into the mutexes. Join
-        // them before returning so callers reading the buffers (e.g. the final
-        // `refresh_failure_output_logs` after shutdown) see the complete tail.
-        // The pipes hit EOF once the child exits, so the joins complete promptly.
-        self.join_drains();
+        // them (bounded) before returning so callers reading the buffers (e.g.
+        // the final `refresh_failure_output_logs` after shutdown) see the
+        // complete tail. The pipes hit EOF once the child exits, so the joins
+        // complete promptly unless a helper inherited the pipe write-ends.
+        self.join_drains_bounded(drain_timeout);
         Ok(Some(status))
     }
 
-    /// Join the stdout/stderr drain threads if still live, dropping the handles.
-    fn join_drains(&mut self) {
-        if let Some(handle) = self.stdout_handle.take() {
-            let _ = handle.join();
-        }
-        if let Some(handle) = self.stderr_handle.take() {
-            let _ = handle.join();
+    /// Join the stdout/stderr drain threads if still live, waiting at most
+    /// `timeout` (shared across both drains) for each to signal completion.
+    /// Drain threads that have not finished by the deadline are detached
+    /// (their handles are dropped) so `reap` cannot hang.
+    fn join_drains_bounded(&mut self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        for drain in [self.stdout_drain.take(), self.stderr_drain.take()]
+            .into_iter()
+            .flatten()
+        {
+            while !drain.done.load(Ordering::Acquire) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(2));
+            }
+            if drain.done.load(Ordering::Acquire) {
+                let _ = drain.handle.join();
+            }
+            // else: drain thread still blocked (e.g. a helper process inherited
+            // the pipe write-end and keeps it open after the game exited).
+            // Detach by dropping the handle; the drain thread exits when the
+            // pipe finally EOFs or the test process exits, and the bytes
+            // captured so far remain in the buffer.
         }
     }
 
     pub fn stdout_snapshot(&self) -> String {
-        snapshot(&self.stdout)
+        self.stdout
+            .lock()
+            .map(|guard| guard.snapshot())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().snapshot())
     }
 
     pub fn stderr_snapshot(&self) -> String {
-        snapshot(&self.stderr)
+        self.stderr
+            .lock()
+            .map(|guard| guard.snapshot())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().snapshot())
     }
 
     /// Persist drained stdout/stderr into `dir` using lossy UTF-8 decoding.
@@ -177,11 +264,11 @@ impl Drop for ChildProcess {
     fn drop(&mut self) {
         // Same spirit as Game::Drop: kill/reap unreaped children so panic/early
         // return cannot hang on std::process::Child (e.g. --sleep-forever tests).
-        if self.child.is_none() {
+        if self.child.is_none() && self.stdout_drain.is_none() && self.stderr_drain.is_none() {
             return;
         }
         let _ = self.kill();
-        let _ = self.reap();
+        let _ = self.reap(DEFAULT_DRAIN_GRACE);
     }
 }
 
@@ -194,27 +281,24 @@ fn select_port() -> Result<u16> {
 
 fn spawn_drain(
     mut reader: impl Read + Send + 'static,
-    buffer: Arc<Mutex<Vec<u8>>>,
-) -> JoinHandle<()> {
-    thread::spawn(move || {
+    buffer: Arc<Mutex<CapturedOutput>>,
+) -> DrainHandle {
+    let done = Arc::new(AtomicBool::new(false));
+    let done_flag = Arc::clone(&done);
+    let handle = thread::spawn(move || {
         let mut chunk = [0_u8; 4096];
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
                     if let Ok(mut guard) = buffer.lock() {
-                        guard.extend_from_slice(&chunk[..n]);
+                        guard.push(&chunk[..n]);
                     }
                 }
                 Err(_) => break,
             }
         }
-    })
-}
-
-fn snapshot(buffer: &Arc<Mutex<Vec<u8>>>) -> String {
-    let guard = buffer
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    String::from_utf8_lossy(&guard).into_owned()
+        done_flag.store(true, Ordering::Release);
+    });
+    DrainHandle { handle, done }
 }

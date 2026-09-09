@@ -91,7 +91,7 @@ Build the game under test with your `e2e` feature enabled so `BevyE2EPlugin` is 
 cargo test --features e2e --test e2e
 ```
 
-`BevyE2EPlugin` owns the BRP HTTP transport (it sets up `bevy_brp_extras` on the port chosen by the harness via `BRP_EXTRAS_PORT`). Do **not** register `RemoteHttpPlugin` or `RemotePlugin` separately in the game — `bevy_brp_extras` ignores `BRP_EXTRAS_PORT` when an HTTP transport is already present, which would make the harness poll the wrong endpoint until startup times out.
+`BevyE2EPlugin` owns the BRP HTTP transport (it sets up `bevy_brp_extras` on the port chosen by the harness via `BRP_EXTRAS_PORT`). Do **not** register `RemoteHttpPlugin` separately in the game — `bevy_brp_extras` ignores `BRP_EXTRAS_PORT` when an HTTP transport is already present, which would make the harness poll the wrong endpoint until startup times out. A separately-added `RemotePlugin` is fine: `bevy_brp_extras` composes with it (it adds `RemotePlugin` only when absent and registers its extras methods into the existing `RemoteMethods` resource), so games that need custom remote methods may register `RemotePlugin` before `BevyE2EPlugin` and still reach diagnostics on the harness-selected port.
 
 ## Artifacts
 

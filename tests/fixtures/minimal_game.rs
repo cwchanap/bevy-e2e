@@ -12,6 +12,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let skip_e2e_plugin = args.iter().any(|a| a == "--skip-e2e-plugin");
     let add_remote_http = args.iter().any(|a| a == "--add-remote-http");
+    let add_remote = args.iter().any(|a| a == "--add-remote");
     let duplicate_id = args.iter().any(|a| a == "--duplicate-id");
     let sleep_forever = args.iter().any(|a| a == "--sleep-forever");
     let exit_after_ready_ms = args.iter().find_map(|a| {
@@ -47,6 +48,15 @@ fn main() {
     // instead of letting `BrpExtrasPlugin` silently ignore `BRP_EXTRAS_PORT`.
     if add_remote_http {
         app.add_plugins(bevy::remote::http::RemoteHttpPlugin::default());
+    }
+
+    // Register a separately-added `RemotePlugin` BEFORE `BevyE2EPlugin` to pin
+    // the supported composition: `BrpExtrasPlugin` must reuse the existing
+    // `RemotePlugin` (it adds one only when absent) and register its extras
+    // methods into the existing `RemoteMethods` resource, so the harness still
+    // reaches diagnostics on the port it selected via `BRP_EXTRAS_PORT`.
+    if add_remote {
+        app.add_plugins(bevy::remote::RemotePlugin::default());
     }
 
     if !skip_e2e_plugin {

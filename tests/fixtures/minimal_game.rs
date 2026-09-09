@@ -11,6 +11,7 @@ use bevy_e2e::{BevyE2EPlugin, E2eId};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let skip_e2e_plugin = args.iter().any(|a| a == "--skip-e2e-plugin");
+    let add_remote_http = args.iter().any(|a| a == "--add-remote-http");
     let duplicate_id = args.iter().any(|a| a == "--duplicate-id");
     let sleep_forever = args.iter().any(|a| a == "--sleep-forever");
     let exit_after_ready_ms = args.iter().find_map(|a| {
@@ -40,6 +41,13 @@ fn main() {
         }),
         ..default()
     }));
+
+    // Register a separately-added `RemoteHttpPlugin` BEFORE `BevyE2EPlugin` to
+    // exercise the runtime rejection path: `BevyE2EPlugin::build` must panic
+    // instead of letting `BrpExtrasPlugin` silently ignore `BRP_EXTRAS_PORT`.
+    if add_remote_http {
+        app.add_plugins(bevy::remote::http::RemoteHttpPlugin::default());
+    }
 
     if !skip_e2e_plugin {
         app.add_plugins(BevyE2EPlugin);

@@ -21,7 +21,17 @@ use crate::E2eId;
 /// already-added `RemoteHttpPlugin` (the message is captured on the child's
 /// stderr, which the harness surfaces on the resulting child-exit failure).
 /// Let `BevyE2EPlugin` own the BRP HTTP transport and do not add
-/// `RemoteHttpPlugin` or `RemotePlugin` yourself.
+/// `RemoteHttpPlugin` yourself.
+///
+/// # A pre-existing `RemotePlugin` is supported
+///
+/// Only the HTTP transport (`RemoteHttpPlugin`) is the hazard above. A
+/// separately-added [`bevy::remote::RemotePlugin`] is fine: `BrpExtrasPlugin`
+/// adds `RemotePlugin` only when it is absent and registers its extras methods
+/// into the existing [`bevy::remote::RemoteMethods`] resource either way. A
+/// game that needs custom remote methods may therefore register `RemotePlugin`
+/// before `BevyE2EPlugin` and still reach diagnostics on the harness-selected
+/// port.
 pub struct BevyE2EPlugin;
 
 fn runtime_enabled(lookup: impl Fn(&str) -> Option<String>) -> bool {

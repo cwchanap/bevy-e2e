@@ -55,6 +55,25 @@ fn pre_existing_remote_http_plugin_is_rejected() {
 }
 
 #[test]
+fn pre_existing_remote_plugin_is_supported() {
+    // A game that adds `RemotePlugin` (but not `RemoteHttpPlugin`) before
+    // `BevyE2EPlugin` is a supported composition: `BrpExtrasPlugin` reuses the
+    // existing `RemotePlugin` and registers its extras methods into the
+    // existing `RemoteMethods` resource, so the harness still reaches
+    // diagnostics on the port it selected via `BRP_EXTRAS_PORT`. This pins that
+    // contract so the rejection above cannot be accidentally broadened to
+    // `RemotePlugin`.
+    let mut game = Game::launch(fixture_options().arg("--add-remote")).unwrap();
+    assert!(game.is_running());
+    assert!(
+        game.brp("brp_extras/get_diagnostics", json!({})).is_ok(),
+        "a pre-existing RemotePlugin must still reach extras diagnostics"
+    );
+    game.shutdown().unwrap();
+    assert!(!game.is_running());
+}
+
+#[test]
 fn two_children_can_answer_distinct_main_brp_sessions() {
     let a = std::thread::spawn(|| Game::launch(fixture_options()));
     let b = std::thread::spawn(|| Game::launch(fixture_options()));

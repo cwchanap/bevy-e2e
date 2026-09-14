@@ -19,9 +19,9 @@ Launch your already-built game binary from an ordinary Rust `#[test]`, drive it 
 
 ## Consumer setup
 
-### 1. Depend with a runtime-only game feature
+### 1. Depend on a released version
 
-Keep the plugin out of release builds that do not enable your `e2e` feature. Use **runtime-only** for the game crate dependency so `ureq` is not pulled into the game binary:
+Pin the GitHub release tag rather than a commit SHA. Keep the plugin out of release builds that do not enable your `e2e` feature. Use **runtime-only** for the game crate dependency so `ureq` is not pulled into the game binary:
 
 ```toml
 [features]
@@ -29,14 +29,18 @@ e2e = ["dep:bevy_e2e"]
 
 [dependencies]
 bevy_e2e = {
-  version = "0.1",
+  git = "https://github.com/cwchanap/bevy-e2e",
+  tag = "v0.1.0",
   optional = true,
   default-features = false,
   features = ["runtime"],
 }
 
 [dev-dependencies]
-bevy_e2e = "0.1"
+bevy_e2e = {
+  git = "https://github.com/cwchanap/bevy-e2e",
+  tag = "v0.1.0",
+}
 ```
 
 ### 2. Feature-gate `BevyE2EPlugin`
@@ -136,6 +140,16 @@ There is **no generic headless mode**. v0.1 drives a rendered desktop window (Li
 - The framework **does not promise** rendered consumer parallelism (GPU/compositor/windowing may still contend).
 - This repository's own CI **serializes** rendered tests (`--test-threads=1`) for stability.
 - A two-child lifecycle test pins the **observed Bevy 0.19** behavior: two main BRP diagnostics sessions can answer concurrently. That experiment is a real test, not an inference from Bevy's fixed render-subapp BRP port.
+
+## Releases
+
+`Cargo.toml` is the version source of truth. To cut a release:
+
+1. Merge the desired version in `Cargo.toml` to `main`.
+2. Run the `release` GitHub Actions workflow from `main`.
+3. The workflow verifies `cargo package --locked`, refuses to reuse an existing version tag, and creates a `v<version>` GitHub Release pointing at that `main` commit.
+
+For example, package version `0.1.0` produces release tag `v0.1.0`. Consumers should pin that tag rather than a commit SHA.
 
 ## Local verification (Linux)
 

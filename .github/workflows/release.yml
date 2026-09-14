@@ -1,0 +1,57 @@
+name: release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: create versioned release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Resolve package version
+        id: package
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "$version" ]; then
+            echo "error: could not resolve package version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag is unused
+        shell: bash
+        run: |
+          git fetch --tags --force
+          tag="${{ steps.package.outputs.tag }}"
+          if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+            echo "error: tag $tag already exists; bump Cargo.toml before releasing" >&2
+            exit 1
+          fi
+
+      - name: Verify package
+        run: cargo package --locked
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="${{ steps.package.outputs.tag }}"
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "$tag" \
+            --generate-notes

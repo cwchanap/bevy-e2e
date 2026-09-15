@@ -1,20 +1,22 @@
 name: release
 
 on:
-  workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
-    name: create versioned release
-    if: github.ref == 'refs/heads/main'
+    name: validate versioned release
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Install Rust 1.95
         uses: dtolnay/rust-toolchain@1.95.0
@@ -32,26 +34,15 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
 
-      - name: Verify tag is unused
+      - name: Verify release tag matches package version
         shell: bash
         run: |
-          git fetch --tags --force
-          tag="${{ steps.package.outputs.tag }}"
-          if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
-            echo "error: tag $tag already exists; bump Cargo.toml before releasing" >&2
+          expected="${{ steps.package.outputs.tag }}"
+          actual="${{ github.event.release.tag_name }}"
+          if [ "$actual" != "$expected" ]; then
+            echo "error: release tag $actual does not match Cargo.toml version $expected" >&2
             exit 1
           fi
 
       - name: Verify package
         run: cargo package --locked
-
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          tag="${{ steps.package.outputs.tag }}"
-          gh release create "$tag" \
-            --target "$GITHUB_SHA" \
-            --title "$tag" \
-            --generate-notes

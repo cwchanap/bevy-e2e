@@ -146,10 +146,10 @@ There is **no generic headless mode**. v0.1 drives a rendered desktop window (Li
 `Cargo.toml` is the version source of truth. To cut a release:
 
 1. Merge the desired version in `Cargo.toml` to `main`.
-2. Run the `release` GitHub Actions workflow from `main`.
-3. The workflow verifies `cargo package --locked`, refuses to reuse an existing version tag, and creates a `v<version>` GitHub Release pointing at that `main` commit.
+2. Create and publish a GitHub Release using the matching `v<version>` tag, targeting `main` when creating a new tag.
+3. Publishing the release automatically runs the `release` workflow against that tag. The workflow verifies the tag matches `Cargo.toml` and runs `cargo package --locked`.
 
-For example, package version `0.1.0` produces release tag `v0.1.0`. Consumers should pin that tag rather than a commit SHA.
+For example, package version `0.1.0` uses release tag `v0.1.0`. Consumers should pin that tag rather than a commit SHA.
 
 ## Local verification (Linux)
 

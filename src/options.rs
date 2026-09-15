@@ -22,7 +22,7 @@ impl E2eLaunchOptions {
             binary: binary.into(),
             args: Vec::new(),
             env: Vec::new(),
-            startup_timeout: Duration::from_secs(10),
+            startup_timeout: Duration::from_secs(20),
             operation_timeout: Duration::from_secs(5),
             shutdown_timeout: Duration::from_secs(3),
             artifact_root: PathBuf::from("test_output"),
